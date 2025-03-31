@@ -6,8 +6,19 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
 from sklearn.preprocessing import StandardScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from wordcloud import WordCloud
+import nltk
 import warnings
 warnings.filterwarnings('ignore')
+
+# Download necessary NLTK data
+nltk.download('punkt', quiet=True)
+nltk.download('stopwords', quiet=True)
+nltk.download('wordnet', quiet=True)
 
 # Set plot style
 plt.style.use('ggplot')
@@ -33,6 +44,10 @@ class YelpDataCleaner:
         self.cleaned_reviews_df = None
         self.cleaned_business_df = None
         self.cleaned_users_df = None
+        
+        # Initialize NLTK tools
+        self.stop_words = set(stopwords.words('english'))
+        self.lemmatizer = WordNetLemmatizer()
         
     def load_data(self):
         """Load the Yelp dataset from JSON files"""
@@ -78,6 +93,9 @@ class YelpDataCleaner:
         
         # Add text length feature
         self.cleaned_reviews_df['text_length'] = self.cleaned_reviews_df['text'].apply(len)
+        
+        # Process text using NLTK
+        self.cleaned_reviews_df['processed_text'] = self.cleaned_reviews_df['text'].apply(self.preprocess_text)
         
         # Remove duplicates
         self.cleaned_reviews_df = self.cleaned_reviews_df.drop_duplicates(subset=['review_id'])
@@ -156,6 +174,22 @@ class YelpDataCleaner:
         self.handle_user_outliers()
         
         print(f"Cleaned users dataset shape: {self.cleaned_users_df.shape}")
+    
+    def preprocess_text(self, text):
+        """Preprocess text using NLTK"""
+        if not isinstance(text, str):
+            return ""
+        
+        # Lowercase the text
+        text = text.lower()
+        
+        # Tokenize
+        tokens = word_tokenize(text)
+        
+        # Remove stopwords and lemmatize
+        tokens = [self.lemmatizer.lemmatize(word) for word in tokens if word.isalnum() and word not in self.stop_words]
+        
+        return ' '.join(tokens)
     
     def get_outlier_bounds(self, df, column):
         """Calculate outlier bounds using IQR method"""
@@ -341,8 +375,35 @@ class YelpDataCleaner:
         print("Data cleaning and preprocessing pipeline completed!")
 
 if __name__ == "__main__":
+    def generate_summary_statistics(cleaner):
+        """Generate summary statistics for the cleaned data"""
+        print("\n=== SUMMARY STATISTICS ===\n")
+
+        # Reviews summary
+        print("Reviews Dataset:")
+        print(f"Total reviews: {len(cleaner.cleaned_reviews_df)}")
+        print(f"Average rating: {cleaner.cleaned_reviews_df['stars'].mean():.2f}")
+        print(f"Rating distribution: {cleaner.cleaned_reviews_df['stars'].value_counts().sort_index().to_dict()}")
+        print(f"Average votes per review: {cleaner.cleaned_reviews_df['total_votes'].mean():.2f}")
+        print(f"Average text length: {cleaner.cleaned_reviews_df['text_length'].mean():.2f}")
+
+        # Business summary
+        print("\nBusiness Dataset:")
+        print(f"Total businesses: {len(cleaner.cleaned_business_df)}")
+        print(f"Average rating: {cleaner.cleaned_business_df['stars'].mean():.2f}")
+        print(f"Average review count: {cleaner.cleaned_business_df['review_count'].mean():.2f}")
+        print(f"Top 5 cities: {cleaner.cleaned_business_df['city'].value_counts().head(5).to_dict()}")
+        print(f"Top 5 states: {cleaner.cleaned_business_df['state'].value_counts().head(5).to_dict()}")
+
+        # Users summary
+        print("\nUsers Dataset:")
+        print(f"Total users: {len(cleaner.cleaned_users_df)}")
+        print(f"Average reviews per user: {cleaner.cleaned_users_df['review_count'].mean():.2f}")
+        print(f"Average user rating: {cleaner.cleaned_users_df['average_stars'].mean():.2f}")
+        
+        
     # Define file paths
-    base_path = os.path.join(os.path.dirname(os.path.dirname(os.getcwd())), "data")
+    base_path = os.path.join(os.path.dirname(os.getcwd()), "data")
     reviews_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_review.json")
     business_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_business.json")
     user_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_user.json")
@@ -351,3 +412,6 @@ if __name__ == "__main__":
     # Create and run the data cleaner
     cleaner = YelpDataCleaner(reviews_path, business_path, user_path, output_dir)
     cleaner.run_pipeline()
+
+    # Generate summary statistics
+    generate_summary_statistics(cleaner)
