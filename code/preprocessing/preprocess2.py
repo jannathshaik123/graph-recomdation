@@ -375,10 +375,10 @@ class YelpDataCleaner:
         print("Data cleaning and preprocessing pipeline completed!")
         
 if __name__ == "__main__":
-
     def generate_summary_statistics(cleaner):
-    # """Generate summary statistics for the cleaned data"""
+        """Generate summary statistics for the cleaned data"""
         print("\n=== SUMMARY STATISTICS ===\n")
+
         # Reviews summary
         print("Reviews Dataset:")
         print(f"Total reviews: {len(cleaner.cleaned_reviews_df)}")
@@ -400,7 +400,8 @@ if __name__ == "__main__":
         print(f"Total users: {len(cleaner.cleaned_users_df)}")
         print(f"Average reviews per user: {cleaner.cleaned_users_df['review_count'].mean():.2f}")
         print(f"Average user rating: {cleaner.cleaned_users_df['average_stars'].mean():.2f}")
-
+        
+        
     # Define file paths
     base_path = os.path.join(os.path.dirname(os.getcwd()), "data")
     reviews_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_review.json")
