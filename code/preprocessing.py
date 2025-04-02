@@ -1,420 +1,246 @@
+import json
 import pandas as pd
 import numpy as np
-import json
 import os
 from datetime import datetime
-from sklearn.preprocessing import StandardScaler
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
-import nltk
-import warnings
-warnings.filterwarnings('ignore')
 
-# Download necessary NLTK data
-nltk.download('punkt', quiet=True)
-nltk.download('stopwords', quiet=True)
-nltk.download('wordnet', quiet=True)
+# Function to read JSON files line by line
+def read_json_lines(file_path):
+    data = []
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            data.append(json.loads(line))
+    return data
 
-class YelpDataProcessor:
-    def __init__(self):
-        """Initialize the data processor with reusable components"""
-        # Initialize NLTK tools
-        self.stop_words = set(stopwords.words('english'))
-        self.lemmatizer = WordNetLemmatizer()
-        
-        # Initialize scalers as instance variables to reuse for test data
-        self.review_scaler = StandardScaler()
-        self.business_scaler = StandardScaler()
-        self.user_scaler = StandardScaler()
-        
-        # Store column information for consistent processing
-        self.review_numerical_cols = ['useful_votes', 'funny_votes', 'cool_votes', 'total_votes', 'text_length']
-        self.business_numerical_cols = ['stars', 'review_count', 'latitude', 'longitude']
-        self.user_numerical_cols = ['review_count', 'average_stars']
-        
-        # Store fitted scalers state
-        self.is_fitted = False
-        
-        # Store top categories and cities for consistent encoding
-        self.top_categories = []
-        self.top_cities = []
+# Function to check if file exists
+def check_file_exists(file_path):
+    return os.path.isfile(file_path)
+
+# Define file paths
+# You'll need to update these paths to match your directory structure
+base_path = os.path.join(os.path.dirname(os.getcwd()), "data")
+
+train_business_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_business.json")
+train_user_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_user.json")
+train_review_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_review.json")
+train_checkin_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_checkin.json")
+
+test_business_path = os.path.join(base_path, "yelp_test_set/yelp_test_set_business.json")
+test_user_path = os.path.join(base_path, "yelp_test_set/yelp_test_set_user.json")
+test_review_path = os.path.join(base_path, "yelp_test_set/yelp_test_set_review.json")
+test_checkin_path = os.path.join(base_path, "yelp_test_set/yelp_test_set_checkin.json")
+
+print("Starting data preprocessing...")
+
+# Load test data
+print("Loading test data...")
+test_businesses = read_json_lines(test_business_path)
+test_users = read_json_lines(test_user_path)
+test_reviews = read_json_lines(test_review_path)
+test_checkins = read_json_lines(test_checkin_path) if check_file_exists(test_checkin_path) else []
+
+# Load training data
+print("Loading training data...")
+train_businesses = read_json_lines(train_business_path)
+train_users = read_json_lines(train_user_path)
+train_reviews = read_json_lines(train_review_path)
+train_checkins = read_json_lines(train_checkin_path) if check_file_exists(train_checkin_path) else []
+
+# Convert to DataFrames
+print("Converting to DataFrames...")
+business_train_df = pd.DataFrame(train_businesses)
+user_train_df = pd.DataFrame(train_users)
+review_train_df = pd.DataFrame(train_reviews)
+checkin_train_df = pd.DataFrame(train_checkins) if train_checkins else pd.DataFrame()
+
+business_test_df = pd.DataFrame(test_businesses)
+user_test_df = pd.DataFrame(test_users)
+review_test_df = pd.DataFrame(test_reviews)
+checkin_test_df = pd.DataFrame(test_checkins) if test_checkins else pd.DataFrame()
+
+# Combine business data
+print("Merging business data...")
+all_businesses = pd.concat([business_train_df, business_test_df], ignore_index=True)
+all_businesses = all_businesses.drop_duplicates(subset='business_id')
+
+# Combine user data
+print("Merging user data...")
+all_users = pd.concat([user_train_df, user_test_df], ignore_index=True)
+all_users = all_users.drop_duplicates(subset='user_id')
+
+# Combine review data
+print("Merging review data...")
+all_reviews = pd.concat([review_train_df, review_test_df], ignore_index=True)
+
+# Combine checkin data if available
+if not checkin_train_df.empty or not checkin_test_df.empty:
+    print("Merging checkin data...")
+    all_checkins = pd.concat([checkin_train_df, checkin_test_df], ignore_index=True)
+    all_checkins = all_checkins.drop_duplicates(subset='business_id')
+else:
+    all_checkins = pd.DataFrame()
+
+# Process business features
+print("Processing business features...")
+# Convert categories from list to string if needed
+all_businesses['categories_str'] = all_businesses['categories'].apply(
+    lambda x: ', '.join(x) if isinstance(x, list) else '')
+
+# Extract business features
+business_features = all_businesses[['business_id', 'name', 'city', 'state', 
+                                   'latitude', 'longitude', 'review_count', 'categories_str']]
+
+# Add stars column if it exists (it's removed in test data)
+if 'stars' in all_businesses.columns:
+    business_features['stars'] = all_businesses['stars']
+
+# Process user features
+print("Processing user features...")
+user_features = all_users[['user_id', 'name', 'review_count']]
+
+# Add average_stars and votes if they exist (they're removed in test data)
+if 'average_stars' in user_train_df.columns:
+    # Create a mapping of user_id to average_stars from training data
+    avg_stars_map = user_train_df.set_index('user_id')['average_stars'].to_dict()
+    # Apply this mapping to all users
+    user_features['average_stars'] = user_features['user_id'].map(avg_stars_map)
+
+if 'votes' in user_train_df.columns:
+    # Extract vote counts from training data
+    user_train_votes = user_train_df.copy()
+    user_train_votes['useful_votes'] = user_train_votes['votes'].apply(lambda x: x.get('useful', 0) if isinstance(x, dict) else 0)
+    user_train_votes['funny_votes'] = user_train_votes['votes'].apply(lambda x: x.get('funny', 0) if isinstance(x, dict) else 0)
+    user_train_votes['cool_votes'] = user_train_votes['votes'].apply(lambda x: x.get('cool', 0) if isinstance(x, dict) else 0)
     
-    def load_data(self, reviews_path, business_path, user_path, is_test=False):
-        """Load the Yelp dataset from JSON files"""
-        print(f"Loading {'test' if is_test else 'training'} data...")
-        
-        reviews_df = self.load_json_data(reviews_path)
-        business_df = self.load_json_data(business_path)
-        users_df = self.load_json_data(user_path)
-        
-        print(f"Reviews dataset shape: {reviews_df.shape}")
-        print(f"Business dataset shape: {business_df.shape}")
-        print(f"Users dataset shape: {users_df.shape}")
-        
-        # For test data, we need to handle the limited fields
-        if is_test:
-            # Test reviews might not have all fields
-            if 'stars' not in reviews_df.columns:
-                reviews_df['stars'] = np.nan
-            if 'text' not in reviews_df.columns:
-                reviews_df['text'] = ''
-            if 'date' not in reviews_df.columns:
-                reviews_df['date'] = pd.Timestamp('now')
-            if 'votes' not in reviews_df.columns:
-                reviews_df['votes'] = [{'useful': 0, 'funny': 0, 'cool': 0}] * len(reviews_df)
-        
-        return reviews_df, business_df, users_df
+    # Create mappings
+    useful_map = user_train_votes.set_index('user_id')['useful_votes'].to_dict()
+    funny_map = user_train_votes.set_index('user_id')['funny_votes'].to_dict()
+    cool_map = user_train_votes.set_index('user_id')['cool_votes'].to_dict()
     
-    def load_json_data(self, file_path):
-        """Load JSON data from file"""
-        data = []
-        with open(file_path, 'r') as f:
-            for line in f:
-                try:
-                    data.append(json.loads(line))
-                except json.JSONDecodeError as e:
-                    print(f"Error decoding JSON: {e}")
-                    continue
-        return pd.DataFrame(data)
+    # Apply mappings
+    user_features['useful_votes'] = user_features['user_id'].map(useful_map)
+    user_features['funny_votes'] = user_features['user_id'].map(funny_map)
+    user_features['cool_votes'] = user_features['user_id'].map(cool_map)
+
+# Process review features
+print("Processing review features...")
+# For training reviews, keep essential columns
+review_features = review_train_df[['user_id', 'business_id', 'stars', 'date']]
+
+# Convert date to datetime and extract temporal features
+review_features['date'] = pd.to_datetime(review_features['date'])
+review_features['year'] = review_features['date'].dt.year
+review_features['month'] = review_features['date'].dt.month
+review_features['day_of_week'] = review_features['date'].dt.dayofweek
+
+# Process votes in reviews if available
+if 'votes' in review_train_df.columns:
+    review_features['useful_votes'] = review_train_df['votes'].apply(lambda x: x.get('useful', 0) if isinstance(x, dict) else 0)
+    review_features['funny_votes'] = review_train_df['votes'].apply(lambda x: x.get('funny', 0) if isinstance(x, dict) else 0)
+    review_features['cool_votes'] = review_train_df['votes'].apply(lambda x: x.get('cool', 0) if isinstance(x, dict) else 0)
+
+# Create a merged dataset for recommendation
+print("Creating merged dataset...")
+merged_data = review_features.merge(business_features, on='business_id', how='left')
+merged_data = merged_data.merge(user_features, on='user_id', how='left', suffixes=('_business', '_user'))
+
+# Save the merged dataset
+print("Saving merged dataset...")
+merged_data.to_csv('yelp_recommendation_data.csv', index=False)
+
+# Create a user-item matrix for collaborative filtering
+print("Creating user-item matrix...")
+user_item_matrix = review_features.pivot_table(
+    index='user_id', 
+    columns='business_id', 
+    values='stars'
+)
+user_item_matrix.to_csv('user_item_matrix.csv')
+
+# Prepare test set for predictions
+print("Preparing test set for predictions...")
+prediction_pairs = review_test_df[['user_id', 'business_id']]
+prediction_pairs.to_csv('prediction_pairs.csv', index=False)
+
+# Create a business profile dataset
+print("Creating business profile dataset...")
+business_profile = business_features.copy()
+business_profile.to_csv('business_profile.csv', index=False)
+
+# Create a user profile dataset
+print("Creating user profile dataset...")
+user_profile = user_features.copy()
+user_profile.to_csv('user_profile.csv', index=False)
+
+# If checkin data is available, process it
+if not all_checkins.empty:
+    print("Processing checkin data...")
+    # Flatten the checkin_info dictionary into columns
+    checkin_features = all_checkins[['business_id']].copy()
     
-    def preprocess_text(self, text):
-        """Preprocess text using NLTK"""
-        if not isinstance(text, str):
-            return ""
+    # Create a function to extract checkin counts by day and hour
+    def extract_checkin_features(checkin_info):
+        if not isinstance(checkin_info, dict):
+            return {}
         
-        # Lowercase the text
-        text = text.lower()
+        # Initialize counts
+        day_counts = {i: 0 for i in range(7)}  # 0-6 for days of week
+        hour_counts = {i: 0 for i in range(24)}  # 0-23 for hours
         
-        # Tokenize
-        tokens = word_tokenize(text)
-        
-        # Remove stopwords and lemmatize
-        tokens = [self.lemmatizer.lemmatize(word) for word in tokens if word.isalnum() and word not in self.stop_words]
-        
-        return ' '.join(tokens)
-    
-    def get_outlier_bounds(self, df, column):
-        """Calculate outlier bounds using IQR method"""
-        Q1 = df[column].quantile(0.25)
-        Q3 = df[column].quantile(0.75)
-        IQR = Q3 - Q1
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
-        return lower_bound, upper_bound
-    
-    def process_reviews(self, reviews_df, fit=True):
-        """Process the reviews dataset"""
-        print("Processing reviews dataset...")
-        
-        # Make a copy to avoid modifying the original
-        processed_df = reviews_df.copy()
-        
-        # Extract vote counts if votes column exists and contains dictionaries
-        if 'votes' in processed_df.columns:
-            processed_df['useful_votes'] = processed_df['votes'].apply(
-                lambda x: x.get('useful', 0) if isinstance(x, dict) else 0
-            )
-            processed_df['funny_votes'] = processed_df['votes'].apply(
-                lambda x: x.get('funny', 0) if isinstance(x, dict) else 0
-            )
-            processed_df['cool_votes'] = processed_df['votes'].apply(
-                lambda x: x.get('cool', 0) if isinstance(x, dict) else 0
-            )
-            processed_df['total_votes'] = processed_df['useful_votes'] + processed_df['funny_votes'] + processed_df['cool_votes']
-        else:
-            # Create default columns if votes don't exist
-            processed_df['useful_votes'] = 0
-            processed_df['funny_votes'] = 0
-            processed_df['cool_votes'] = 0
-            processed_df['total_votes'] = 0
-        
-        # Convert date to datetime if it exists
-        if 'date' in processed_df.columns:
-            processed_df['date'] = pd.to_datetime(processed_df['date'])
-        
-        # Add text length feature if text exists
-        if 'text' in processed_df.columns:
-            processed_df['text_length'] = processed_df['text'].apply(lambda x: len(x) if isinstance(x, str) else 0)
-            # Process text using NLTK
-            processed_df['processed_text'] = processed_df['text'].apply(self.preprocess_text)
-        else:
-            processed_df['text_length'] = 0
-            processed_df['processed_text'] = ''
-        
-        # Remove duplicates if review_id exists
-        if 'review_id' in processed_df.columns:
-            processed_df = processed_df.drop_duplicates(subset=['review_id'])
-        
-        # Handle missing values
-        if 'text' in processed_df.columns:
-            processed_df['text'] = processed_df['text'].fillna('')
-        if 'stars' in processed_df.columns:
-            processed_df['stars'] = processed_df['stars'].fillna(processed_df['stars'].median() if not processed_df['stars'].isna().all() else 3.0)
-        
-        # Remove reviews with invalid business_id or user_id
-        processed_df = processed_df.dropna(subset=['business_id', 'user_id'])
-        
-        # Handle outliers for numerical columns
-        for col in ['text_length', 'total_votes', 'useful_votes', 'funny_votes', 'cool_votes']:
-            if col in processed_df.columns:
-                if fit:
-                    lower_bound, upper_bound = self.get_outlier_bounds(processed_df, col)
-                    # Store bounds for test data
-                    setattr(self, f"{col}_lower", lower_bound)
-                    setattr(self, f"{col}_upper", upper_bound)
-                else:
-                    # Use stored bounds for test data
-                    lower_bound = getattr(self, f"{col}_lower", 0)
-                    upper_bound = getattr(self, f"{col}_upper", processed_df[col].max())
+        for key, count in checkin_info.items():
+            if '-' in key:
+                hour, day = map(int, key.split('-'))
+                day_counts[day] += count
+                hour_counts[hour] += count
                 
-                processed_df[col] = processed_df[col].clip(lower=lower_bound if col != 'text_length' else 0, upper=upper_bound)
-        
-        # Extract time features if date exists
-        if 'date' in processed_df.columns:
-            processed_df['year'] = processed_df['date'].dt.year
-            processed_df['month'] = processed_df['date'].dt.month
-            processed_df['day'] = processed_df['date'].dt.day
-            processed_df['dayofweek'] = processed_df['date'].dt.dayofweek
-        
-        # Normalize numerical features
-        numerical_cols = [col for col in self.review_numerical_cols if col in processed_df.columns]
-        if len(numerical_cols) > 0:
-            if fit:
-                self.review_scaler.fit(processed_df[numerical_cols])
-            
-            processed_df[numerical_cols] = self.review_scaler.transform(processed_df[numerical_cols])
-        
-        return processed_df
+        return {
+            **{f'day_{day}': count for day, count in day_counts.items()},
+            **{f'hour_{hour}': count for hour, count in hour_counts.items()}
+        }
     
-    def process_businesses(self, business_df, fit=True):
-        """Process the businesses dataset"""
-        print("Processing businesses dataset...")
-        
-        # Make a copy to avoid modifying the original
-        processed_df = business_df.copy()
-        
-        # Remove duplicates
-        processed_df = processed_df.drop_duplicates(subset=['business_id'])
-        
-        # Handle missing values
-        processed_df['name'] = processed_df['name'].fillna('Unknown')
-        processed_df['city'] = processed_df['city'].fillna('Unknown')
-        processed_df['state'] = processed_df['state'].fillna('Unknown')
-        processed_df['stars'] = processed_df['stars'].fillna(processed_df['stars'].median() if not processed_df['stars'].isna().all() else 3.0)
-        processed_df['review_count'] = processed_df['review_count'].fillna(0)
-        processed_df['categories'] = processed_df['categories'].fillna('')
-        
-        # Handle outliers for review_count
-        if fit:
-            lower_bound, upper_bound = self.get_outlier_bounds(processed_df, 'review_count')
-            setattr(self, "review_count_lower", lower_bound)
-            setattr(self, "review_count_upper", upper_bound)
-        else:
-            lower_bound = getattr(self, "review_count_lower", 0)
-            upper_bound = getattr(self, "review_count_upper", processed_df['review_count'].max())
-        
-        processed_df['review_count'] = processed_df['review_count'].clip(lower=lower_bound, upper=upper_bound)
-        
-        # Convert categories to list
-        processed_df['categories_list'] = processed_df['categories'].apply(
-            lambda x: [cat.strip() for cat in x.split(',')] if isinstance(x, str) and x else []
-        )
-        
-        # Normalize numerical features
-        numerical_cols = [col for col in self.business_numerical_cols if col in processed_df.columns]
-        if len(numerical_cols) > 0:
-            if fit:
-                self.business_scaler.fit(processed_df[numerical_cols])
-            
-            processed_df[numerical_cols] = self.business_scaler.transform(processed_df[numerical_cols])
-        
-        # Process categorical features
-        if fit:
-            # Store top cities and categories for test data
-            self.top_cities = processed_df['city'].value_counts().head(10).index.tolist()
-            
-            # Extract top categories from all businesses
-            all_categories = []
-            for cats in processed_df['categories_list']:
-                all_categories.extend(cats)
-            
-            category_counts = pd.Series(all_categories).value_counts()
-            self.top_categories = category_counts.head(10).index.tolist()
-        
-        # Create one-hot encoding for top cities
-        processed_df['city_processed'] = processed_df['city'].apply(
-            lambda x: x if x in self.top_cities else 'Other'
-        )
-        
-        # Extract top categories
-        for category in self.top_categories:
-            processed_df[f'category_{category}'] = processed_df['categories_list'].apply(
-                lambda x: 1 if category in x else 0
-            )
-        
-        return processed_df
+    # Apply the function to each row
+    checkin_dicts = all_checkins['checkin_info'].apply(extract_checkin_features)
+    checkin_df = pd.DataFrame(checkin_dicts.tolist())
     
-    def process_users(self, users_df, fit=True):
-        """Process the users dataset"""
-        print("Processing users dataset...")
-        
-        # Make a copy to avoid modifying the original
-        processed_df = users_df.copy()
-        
-        # Remove duplicates
-        processed_df = processed_df.drop_duplicates(subset=['user_id'])
-        
-        # Handle missing values
-        processed_df['name'] = processed_df['name'].fillna('Unknown')
-        processed_df['review_count'] = processed_df['review_count'].fillna(0)
-        
-        # Handle average_stars if it exists
-        if 'average_stars' in processed_df.columns:
-            processed_df['average_stars'] = processed_df['average_stars'].fillna(
-                processed_df['average_stars'].median() if not processed_df['average_stars'].isna().all() else 3.0
-            )
-        else:
-            processed_df['average_stars'] = 3.0  # Default value
-        
-        # Extract vote counts if votes column exists
-        if 'votes' in processed_df.columns:
-            processed_df['useful_votes'] = processed_df['votes'].apply(lambda x: x.get('useful', 0) if isinstance(x, dict) else 0)
-            processed_df['funny_votes'] = processed_df['votes'].apply(lambda x: x.get('funny', 0) if isinstance(x, dict) else 0)
-            processed_df['cool_votes'] = processed_df['votes'].apply(lambda x: x.get('cool', 0) if isinstance(x, dict) else 0)
-            processed_df['total_votes'] = processed_df['useful_votes'] + processed_df['funny_votes'] + processed_df['cool_votes']
-            self.user_numerical_cols.extend(['useful_votes', 'funny_votes', 'cool_votes', 'total_votes'])
-        
-        # Handle outliers
-        for col in ['review_count', 'average_stars']:
-            if col in processed_df.columns:
-                if fit:
-                    lower_bound, upper_bound = self.get_outlier_bounds(processed_df, col)
-                    setattr(self, f"user_{col}_lower", lower_bound)
-                    setattr(self, f"user_{col}_upper", upper_bound)
-                else:
-                    lower_bound = getattr(self, f"user_{col}_lower", 0)
-                    upper_bound = getattr(self, f"user_{col}_upper", processed_df[col].max() if col in processed_df.columns else 5.0)
-                
-                processed_df[col] = processed_df[col].clip(lower=lower_bound, upper=upper_bound)
-        
-        # Normalize numerical features
-        numerical_cols = [col for col in self.user_numerical_cols if col in processed_df.columns]
-        if len(numerical_cols) > 0:
-            if fit:
-                self.user_scaler.fit(processed_df[numerical_cols])
-            
-            processed_df[numerical_cols] = self.user_scaler.transform(processed_df[numerical_cols])
-        
-        return processed_df
+    # Combine with business_id
+    checkin_features = pd.concat([checkin_features, checkin_df], axis=1)
+    checkin_features.to_csv('checkin_features.csv', index=False)
     
-    def create_merged_dataset(self, reviews_df, business_df, users_df):
-        """Create a merged dataset for analysis"""
-        # Merge reviews with business data
-        business_cols = ['business_id', 'name', 'city', 'state', 'stars', 'categories']
-        business_cols = [col for col in business_cols if col in business_df.columns]
-        
-        merged_df = reviews_df.merge(
-            business_df[business_cols],
-            on='business_id',
-            suffixes=('_review', '_business')
-        )
-        
-        # Merge with user data
-        user_cols = ['user_id', 'name', 'review_count', 'average_stars']
-        user_cols = [col for col in user_cols if col in users_df.columns]
-        
-        merged_df = merged_df.merge(
-            users_df[user_cols],
-            on='user_id',
-            suffixes=('', '_user')
-        )
-        
-        return merged_df
-    
-    def process_data(self, reviews_path, business_path, user_path, output_dir=None, is_test=False):
-        """Process all datasets and optionally save them"""
-        # Load data
-        reviews_df, business_df, users_df = self.load_data(reviews_path, business_path, user_path, is_test)
-        
-        # Process data
-        processed_reviews = self.process_reviews(reviews_df, fit=not is_test)
-        processed_businesses = self.process_businesses(business_df, fit=not is_test)
-        processed_users = self.process_users(users_df, fit=not is_test)
-        
-        # Create merged dataset
-        merged_df = self.create_merged_dataset(processed_reviews, processed_businesses, processed_users)
-        
-        # Save processed data if output directory is provided
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-            processed_reviews.to_csv(os.path.join(output_dir, f"{'test' if is_test else 'train'}_reviews.csv"), index=False)
-            processed_businesses.to_csv(os.path.join(output_dir, f"{'test' if is_test else 'train'}_businesses.csv"), index=False)
-            processed_users.to_csv(os.path.join(output_dir, f"{'test' if is_test else 'train'}_users.csv"), index=False)
-            merged_df.to_csv(os.path.join(output_dir, f"{'test' if is_test else 'train'}_merged.csv"), index=False)
-            print(f"Processed data saved to {output_dir}")
-        
-        # Mark as fitted if this is training data
-        if not is_test:
-            self.is_fitted = True
-        
-        return processed_reviews, processed_businesses, processed_users, merged_df
+    # Merge checkin data with business profile
+    business_with_checkins = business_profile.merge(checkin_features, on='business_id', how='left')
+    business_with_checkins.to_csv('business_with_checkins.csv', index=False)
 
-# Example usage
-if __name__ == "__main__":
-    # Define file paths
-    base_path = os.path.join(os.path.dirname(os.getcwd()), "data")
-    
-    # Training data paths
-    train_reviews_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_review.json")
-    train_business_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_business.json")
-    train_user_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_user.json")
-    
-    # Test data paths
-    test_reviews_path = os.path.join(base_path, "yelp_test_set/yelp_test_set_review.json")
-    test_business_path = os.path.join(base_path, "yelp_test_set/yelp_test_set_business.json")
-    test_user_path = os.path.join(base_path, "yelp_test_set/yelp_test_set_user.json")
-    
-    # Output directories
-    train_output_dir = os.path.join(base_path, "processed/train")
-    test_output_dir = os.path.join(base_path, "processed/test")
-    
-    # Create processor instance
-    processor = YelpDataProcessor()
-    
-    # Process training data
-    print("Processing training data...")
-    train_reviews, train_businesses, train_users, train_merged = processor.process_data(
-        train_reviews_path, 
-        train_business_path, 
-        train_user_path, 
-        train_output_dir
-    )
-    
-    # Process test data using parameters learned from training data
-    print("\nProcessing test data...")
-    test_reviews, test_businesses, test_users, test_merged = processor.process_data(
-        test_reviews_path, 
-        test_business_path, 
-        test_user_path, 
-        test_output_dir,
-        is_test=True
-    )
-    
-    print("\nData processing completed successfully!")
-    print(f"Processed training data saved to: {train_output_dir}")
-    print(f"Processed test data saved to: {test_output_dir}")
-    
-    # Print summary statistics
-    print("\nTraining data summary:")
-    print(f"Reviews: {len(train_reviews)} records")
-    print(f"Businesses: {len(train_businesses)} records")
-    print(f"Users: {len(train_users)} records")
-    print(f"Merged dataset: {len(train_merged)} records")
-    
-    print("\nTest data summary:")
-    print(f"Reviews: {len(test_reviews)} records")
-    print(f"Businesses: {len(test_businesses)} records")
-    print(f"Users: {len(test_users)} records")
-    print(f"Merged dataset: {len(test_merged)} records")
+# Create a combined dataset with all available features
+print("Creating final combined dataset...")
+final_dataset = merged_data.copy()
 
+# Add any additional features from checkins if available
+if not all_checkins.empty:
+    # Get total checkin count per business
+    checkin_counts = checkin_features.copy()
+    day_cols = [col for col in checkin_counts.columns if col.startswith('day_')]
+    hour_cols = [col for col in checkin_counts.columns if col.startswith('hour_')]
+    
+    if day_cols and hour_cols:
+        checkin_counts['total_checkins'] = checkin_counts[day_cols + hour_cols].sum(axis=1)
+        checkin_counts = checkin_counts[['business_id', 'total_checkins']]
+        
+        # Merge with final dataset
+        final_dataset = final_dataset.merge(checkin_counts, on='business_id', how='left')
+        final_dataset['total_checkins'] = final_dataset['total_checkins'].fillna(0)
+
+# Save the final combined dataset
+final_dataset.to_csv('yelp_recommendation_final.csv', index=False)
+
+print("Data preprocessing complete! Files saved:")
+print("1. yelp_recommendation_data.csv - Main merged dataset")
+print("2. user_item_matrix.csv - For collaborative filtering")
+print("3. prediction_pairs.csv - Test set user-business pairs for prediction")
+print("4. business_profile.csv - Business features")
+print("5. user_profile.csv - User features")
+if not all_checkins.empty:
+    print("6. checkin_features.csv - Checkin features")
+    print("7. business_with_checkins.csv - Business data with checkin information")
+print("8. yelp_recommendation_final.csv - Final combined dataset with all features")
+
+print("\nThese files can now be used to build various recommendation models!")
