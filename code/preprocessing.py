@@ -94,11 +94,18 @@ class YelpDataProcessor:
         # Make a copy to avoid modifying the original
         processed_df = reviews_df.copy()
         
-        # Extract vote counts
-        processed_df['useful_votes'] = processed_df['votes'].apply(lambda x: x.get('useful', 0) if isinstance(x, dict) else 0)
-        processed_df['funny_votes'] = processed_df['votes'].apply(lambda x: x.get('funny', 0) if isinstance(x, dict) else 0)
-        processed_df['cool_votes'] = processed_df['votes'].apply(lambda x: x.get('cool', 0) if isinstance(x, dict) else 0)
-        processed_df['total_votes'] = processed_df['useful_votes'] + processed_df['funny_votes'] + processed_df['cool_votes']
+        # Extract vote counts if the 'votes' column exists
+        if 'votes' in processed_df.columns:
+            processed_df['useful_votes'] = processed_df['votes'].apply(lambda x: x.get('useful', 0) if isinstance(x, dict) else 0)
+            processed_df['funny_votes'] = processed_df['votes'].apply(lambda x: x.get('funny', 0) if isinstance(x, dict) else 0)
+            processed_df['cool_votes'] = processed_df['votes'].apply(lambda x: x.get('cool', 0) if isinstance(x, dict) else 0)
+            processed_df['total_votes'] = processed_df['useful_votes'] + processed_df['funny_votes'] + processed_df['cool_votes']
+        else:
+            # If 'votes' column is missing, set vote counts to 0
+            processed_df['useful_votes'] = 0
+            processed_df['funny_votes'] = 0
+            processed_df['cool_votes'] = 0
+            processed_df['total_votes'] = 0
         
         # Convert date to datetime
         processed_df['date'] = pd.to_datetime(processed_df['date'])
