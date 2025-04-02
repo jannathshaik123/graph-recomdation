@@ -373,7 +373,7 @@ class YelpDataCleaner:
         self.save_data()
         
         print("Data cleaning and preprocessing pipeline completed!")
-        
+
 if __name__ == "__main__":
     def generate_summary_statistics(cleaner):
         """Generate summary statistics for the cleaned data"""
@@ -403,7 +403,7 @@ if __name__ == "__main__":
         
         
     # Define file paths
-    base_path = os.path.join(os.path.dirname(os.getcwd()), "data")
+    base_path = os.path.join(os.path.dirname(os.path.dirname(os.getcwd())), "data")
     reviews_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_review.json")
     business_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_business.json")
     user_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_user.json")
