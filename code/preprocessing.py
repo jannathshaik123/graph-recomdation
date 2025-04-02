@@ -371,10 +371,50 @@ if __name__ == "__main__":
     train_user_path = os.path.join(base_path, "yelp_training_set/yelp_training_set_user.json")
     
     # Test data paths
-    test_reviews_path = os.path.join(base_path, "yelp_test_set_review.json")
-    test_business_path = os.path.join(base_path, "yelp_test_set_business.json")
-    test_user_path = os.path.join(base_path, "yelp_test_set_user.json")
+    test_reviews_path = os.path.join(base_path, "yelp_test_set/yelp_test_set_review.json")
+    test_business_path = os.path.join(base_path, "yelp_test_set/yelp_test_set_business.json")
+    test_user_path = os.path.join(base_path, "yelp_test_set/yelp_test_set_user.json")
     
     # Output directories
     train_output_dir = os.path.join(base_path, "processed/train")
     test_output_dir = os.path.join(base_path, "processed/test")
+    
+    # Create processor instance
+    processor = YelpDataProcessor()
+    
+    # Process training data
+    print("Processing training data...")
+    train_reviews, train_businesses, train_users, train_merged = processor.process_data(
+        train_reviews_path, 
+        train_business_path, 
+        train_user_path, 
+        train_output_dir
+    )
+    
+    # Process test data using parameters learned from training data
+    print("\nProcessing test data...")
+    test_reviews, test_businesses, test_users, test_merged = processor.process_data(
+        test_reviews_path, 
+        test_business_path, 
+        test_user_path, 
+        test_output_dir,
+        is_test=True
+    )
+    
+    print("\nData processing completed successfully!")
+    print(f"Processed training data saved to: {train_output_dir}")
+    print(f"Processed test data saved to: {test_output_dir}")
+    
+    # Print summary statistics
+    print("\nTraining data summary:")
+    print(f"Reviews: {len(train_reviews)} records")
+    print(f"Businesses: {len(train_businesses)} records")
+    print(f"Users: {len(train_users)} records")
+    print(f"Merged dataset: {len(train_merged)} records")
+    
+    print("\nTest data summary:")
+    print(f"Reviews: {len(test_reviews)} records")
+    print(f"Businesses: {len(test_businesses)} records")
+    print(f"Users: {len(test_users)} records")
+    print(f"Merged dataset: {len(test_merged)} records")
+
