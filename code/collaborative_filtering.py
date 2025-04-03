@@ -8,8 +8,9 @@ from sklearn.model_selection import train_test_split
 # Paths to your data and models
 base_path = os.path.join(os.path.dirname(os.getcwd()), "data/processed")
 
-item_based_model_path = 'item_based_cf_model.pkl'
-svd_model_path = 'svd_model.pkl'
+models_path = os.path.join(os.path.dirname(os.getcwd()), 'models')
+item_based_model_path = os.path.join(models_path,'item_based_cf_model.pkl')
+svd_model_path = os.path.join(models_path,'svd_model.pkl')
 
 print("Loading models and data...")
 
