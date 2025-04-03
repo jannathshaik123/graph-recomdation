@@ -2,296 +2,432 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
+from scipy.sparse import csr_matrix, save_npz, load_npz
+from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.model_selection import train_test_split
 
-# Paths to your data and models
-base_path = os.path.join(os.path.dirname(os.getcwd()), "data/processed")
-model_path = os.path.join(os.path.dirname(os.getcwd()), "models")
-
-item_based_model_path = os.path.join(model_path,'item_based_cf_model.pkl')
-svd_model_path = os.path.join(model_path,'svd_model.pkl')
-
-print("Loading models and data...")
-
-# Load the models
-with open(item_based_model_path, 'rb') as f:
-    model_knn = pickle.load(f)
+# Memory-efficient collaborative filtering implementation
+class MemoryEfficientCF:
+    def __init__(self, n_neighbors=20):
+        self.n_neighbors = n_neighbors
+        self.user_similarity = None
+        self.item_similarity = None
+        self.user_to_idx = None
+        self.business_to_idx = None
+        self.idx_to_user = None
+        self.idx_to_business = None
     
-with open(svd_model_path, 'rb') as f:
-    svd_model = pickle.load(f)
-
-# Load the user-item matrix
-user_item_df = pd.read_csv(os.path.join(base_path, 'user_item_matrix.csv'), index_col=0)
-user_item_df = user_item_df.fillna(0)
-
-# Load or create validation data
-# Option 1: If you have ground truth data to evaluate against:
-try:
-    # Try to load the full dataset that includes ratings
-    merged_data = pd.read_csv(os.path.join(base_path, 'yelp_recommendation_data.csv'))
-    print("Creating validation set from full dataset...")
-    # Create a validation set (20% of data)
-    _, val_data = train_test_split(merged_data, test_size=0.2, random_state=42)
-except FileNotFoundError:
-    # Option 2: If you don't have the full dataset, create a validation set from the matrix
-    print("Full dataset not found. Creating validation set from user-item matrix...")
-    # Get non-zero entries from the matrix to use as validation
-    validation_pairs = []
-    for user_id in user_item_df.index[:100]:  # Limit to first 100 users for efficiency
-        for business_id in user_item_df.columns:
-            rating = user_item_df.loc[user_id, business_id]
-            if rating > 0:  # This is a real rating
-                validation_pairs.append({
-                    'user_id': user_id,
-                    'business_id': business_id,
-                    'stars': rating
-                })
-                if len(validation_pairs) >= 1000:  # Limit to 1000 pairs for efficiency
-                    break
-        if len(validation_pairs) >= 1000:
-            break
+    def fit(self, ratings_matrix):
+        """
+        Train the model using the provided ratings matrix
+        
+        Parameters:
+        ratings_matrix (scipy.sparse.csr_matrix): User-item ratings matrix
+        """
+        print("Computing similarity matrices...")
+        # For user-based CF, compute similarity between users
+        self.user_similarity = cosine_similarity(ratings_matrix, dense_output=False)
+        
+        # For item-based CF, compute similarity between items
+        self.item_similarity = cosine_similarity(ratings_matrix.T, dense_output=False)
+        
+        print("Similarity matrices computed successfully")
+        return self
     
-    val_data = pd.DataFrame(validation_pairs)
-    print("Validation set created from user-item matrix.")
-print(val_data.head())
-print(val_data.columns)
-
-print(f"Validation set contains {len(val_data)} ratings.")
-
-# Define prediction functions (copied from your original script)
-def user_based_cf(user_item_matrix, user_id, business_id, k=10):
-    """User-based collaborative filtering to predict rating"""
-    # Check if user or business is not in the matrix
-    if user_id not in user_item_matrix.index or business_id not in user_item_matrix.columns:
-        return 3.5  # Return average rating if user or business is not in training data
+    def predict_user_based(self, ratings_matrix, user_id, item_id):
+        """
+        Predict rating for a specific user-item pair using user-based CF
+        """
+        if self.user_similarity is None:
+            raise ValueError("Model not trained. Call fit() first.")
+        
+        # Get similar users
+        user_sim_scores = self.user_similarity[user_id].toarray().flatten()
+        
+        # Get ratings of all users for this item
+        item_ratings = ratings_matrix[:, item_id].toarray().flatten()
+        
+        # Mask users who haven't rated this item
+        mask = item_ratings > 0
+        if not mask.any():
+            return 0  # No user has rated this item
+        
+        # Get top similar users who rated this item
+        similar_users = user_sim_scores[mask]
+        item_ratings = item_ratings[mask]
+        
+        # Sort by similarity
+        sorted_idx = np.argsort(similar_users)[::-1]
+        top_n_idx = sorted_idx[:self.n_neighbors]
+        
+        # If no similar users, return average rating
+        if len(top_n_idx) == 0:
+            return np.mean(item_ratings) if len(item_ratings) > 0 else 0
+        
+        # Get ratings of top similar users
+        top_sim_users = similar_users[top_n_idx]
+        top_ratings = item_ratings[top_n_idx]
+        
+        # If all similarities are zero, return the mean rating
+        if np.sum(top_sim_users) == 0:
+            return np.mean(top_ratings)
+        
+        # Weighted average of ratings
+        pred = np.sum(top_sim_users * top_ratings) / np.sum(top_sim_users)
+        return pred
     
-    # Get user's row
-    user_row = user_item_matrix.loc[user_id]
+    def predict_item_based(self, ratings_matrix, user_id, item_id):
+        """
+        Predict rating for a specific user-item pair using item-based CF
+        """
+        if self.item_similarity is None:
+            raise ValueError("Model not trained. Call fit() first.")
+        
+        # Get user's ratings
+        user_ratings = ratings_matrix[user_id].toarray().flatten()
+        
+        # Mask items rated by user
+        mask = user_ratings > 0
+        if not mask.any():
+            return 0  # User has not rated any items
+        
+        # Get similarity scores between target item and items rated by user
+        item_sim_scores = self.item_similarity[item_id, mask].toarray().flatten()
+        user_ratings = user_ratings[mask]
+        
+        # Sort by similarity
+        sorted_idx = np.argsort(item_sim_scores)[::-1]
+        top_n_idx = sorted_idx[:self.n_neighbors]
+        
+        # If no similar items, return average rating
+        if len(top_n_idx) == 0:
+            return np.mean(user_ratings) if len(user_ratings) > 0 else 0
+        
+        # Get top similar items
+        top_sim_items = item_sim_scores[top_n_idx]
+        top_ratings = user_ratings[top_n_idx]
+        
+        # If all similarities are zero, return the mean rating
+        if np.sum(top_sim_items) == 0:
+            return np.mean(top_ratings)
+        
+        # Weighted average of ratings
+        pred = np.sum(top_sim_items * top_ratings) / np.sum(top_sim_items)
+        return pred
     
-    # Calculate similarities with other users
-    similarities = []
-    for other_user in user_item_matrix.index:
-        if other_user == user_id:
-            continue
+    def predict(self, ratings_matrix, user_id, item_id, method='hybrid'):
+        """
+        Predict rating for user-item pair using the specified method
         
-        other_row = user_item_matrix.loc[other_user]
-        
-        # Find businesses both users have rated
-        common_businesses = user_row.index[(user_row > 0) & (other_row > 0)]
-        
-        if len(common_businesses) == 0:
-            continue
-            
-        # Calculate cosine similarity between the two users based on common businesses
-        user_ratings = user_row[common_businesses].values
-        other_ratings = other_row[common_businesses].values
-        
-        # Normalize ratings
-        user_ratings = user_ratings - np.mean(user_ratings)
-        other_ratings = other_ratings - np.mean(other_ratings)
-        
-        # Calculate similarity (avoid division by zero)
-        norm_product = np.linalg.norm(user_ratings) * np.linalg.norm(other_ratings)
-        if norm_product == 0:
-            similarity = 0
+        Parameters:
+        method (str): 'user', 'item', or 'hybrid'
+        """
+        if method == 'user':
+            return self.predict_user_based(ratings_matrix, user_id, item_id)
+        elif method == 'item':
+            return self.predict_item_based(ratings_matrix, user_id, item_id)
+        elif method == 'hybrid':
+            user_pred = self.predict_user_based(ratings_matrix, user_id, item_id)
+            item_pred = self.predict_item_based(ratings_matrix, user_id, item_id)
+            return (user_pred + item_pred) / 2
         else:
-            similarity = np.dot(user_ratings, other_ratings) / norm_product
-            
-        similarities.append((other_user, similarity, other_row[business_id]))
-    
-    # Sort by similarity and take top k
-    similarities.sort(key=lambda x: x[1], reverse=True)
-    top_k = similarities[:k]
-    
-    # If no similar users found or none rated the business
-    if not top_k or all(rating == 0 for _, _, rating in top_k):
-        return 3.5  # Return average rating
-    
-    # Calculate weighted average rating
-    weighted_sum = sum(sim * rating for _, sim, rating in top_k if rating > 0)
-    sum_similarities = sum(sim for _, sim, _ in top_k if sim > 0)
-    
-    if sum_similarities == 0:
-        return 3.5  # Return average rating
-    
-    return weighted_sum / sum_similarities
+            raise ValueError("Method must be 'user', 'item', or 'hybrid'")
 
-def item_based_cf(user_item_matrix, user_id, business_id, model_knn, k=10):
-    """Item-based collaborative filtering to predict rating"""
-    # Check if user or business is not in the matrix
-    if user_id not in user_item_matrix.index or business_id not in user_item_matrix.columns:
-        return 3.5  # Return average rating if user or business is not in training data
+    def recommend_top_n(self, ratings_matrix, user_id, n=10, method='hybrid'):
+        """
+        Recommend top N items for a user
+        """
+        # Get all items user hasn't rated
+        user_ratings = ratings_matrix[user_id].toarray().flatten()
+        unrated_items = np.where(user_ratings == 0)[0]
+        
+        # Predict ratings for all unrated items
+        predictions = []
+        for item_id in unrated_items:
+            pred = self.predict(ratings_matrix, user_id, item_id, method)
+            predictions.append((item_id, pred))
+        
+        # Sort by predicted rating
+        predictions.sort(key=lambda x: x[1], reverse=True)
+        
+        # Return top N
+        return predictions[:n]
     
-    # Transpose the matrix for item-based similarity
-    item_item_matrix = user_item_matrix.T
+    def set_mappings(self, user_to_idx, business_to_idx):
+        """
+        Set the ID to index mappings
+        """
+        self.user_to_idx = user_to_idx
+        self.business_to_idx = business_to_idx
+        self.idx_to_user = {idx: user for user, idx in user_to_idx.items()}
+        self.idx_to_business = {idx: business for business, idx in business_to_idx.items()}
     
-    # Get business index
-    try:
-        business_idx = user_item_matrix.columns.get_loc(business_id)
+    def save_model(self, folder_path="model"):
+        """
+        Save the model to disk
+        """
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
         
-        # Find k nearest neighbors
-        distances, indices = model_knn.kneighbors(
-            item_item_matrix.iloc[business_idx, :].values.reshape(1, -1), 
-            n_neighbors=k+1
-        )
+        # Save similarity matrices
+        if self.user_similarity is not None:
+            save_npz(os.path.join(folder_path, "user_similarity.npz"), self.user_similarity)
         
-        # Get similar businesses (excluding the business itself)
-        similar_businesses = [(item_item_matrix.index[idx], distances[0][i]) 
-                            for i, idx in enumerate(indices[0]) 
-                            if item_item_matrix.index[idx] != business_id][:k]
+        if self.item_similarity is not None:
+            save_npz(os.path.join(folder_path, "item_similarity.npz"), self.item_similarity)
         
-        # Get user's ratings for similar businesses
-        user_ratings = []
-        for similar_business, distance in similar_businesses:
-            if similar_business in user_item_matrix.columns:
-                rating = user_item_matrix.loc[user_id, similar_business]
-                if rating > 0:  # Only consider rated items
-                    # Convert distance to similarity (1 - distance)
-                    similarity = 1 - distance
-                    user_ratings.append((rating, similarity))
+        # Save mappings and parameters
+        model_params = {
+            'n_neighbors': self.n_neighbors,
+            'user_to_idx': self.user_to_idx,
+            'business_to_idx': self.business_to_idx,
+            'idx_to_user': self.idx_to_user,
+            'idx_to_business': self.idx_to_business
+        }
         
-        # If user hasn't rated any similar businesses
-        if not user_ratings:
-            return 3.5  # Return average rating
+        with open(os.path.join(folder_path, "model_params.pkl"), 'wb') as f:
+            pickle.dump(model_params, f)
         
-        # Calculate weighted average rating
-        weighted_sum = sum(rating * sim for rating, sim in user_ratings)
-        sum_similarities = sum(sim for _, sim in user_ratings)
+        print(f"Model saved to {folder_path}")
+    
+    @classmethod
+    def load_model(cls, folder_path="model"):
+        """
+        Load the model from disk
+        """
+        # Load parameters
+        with open(os.path.join(folder_path, "model_params.pkl"), 'rb') as f:
+            model_params = pickle.load(f)
         
-        if sum_similarities == 0:
-            return 3.5  # Return average rating
+        # Create model instance
+        model = cls(n_neighbors=model_params['n_neighbors'])
         
-        return weighted_sum / sum_similarities
-    except:
-        return 3.5  # Return average rating if any issues occur
+        # Set mappings
+        model.user_to_idx = model_params['user_to_idx']
+        model.business_to_idx = model_params['business_to_idx']
+        model.idx_to_user = model_params['idx_to_user']
+        model.idx_to_business = model_params['idx_to_business']
+        
+        # Load similarity matrices if they exist
+        if os.path.exists(os.path.join(folder_path, "user_similarity.npz")):
+            model.user_similarity = load_npz(os.path.join(folder_path, "user_similarity.npz"))
+        
+        if os.path.exists(os.path.join(folder_path, "item_similarity.npz")):
+            model.item_similarity = load_npz(os.path.join(folder_path, "item_similarity.npz"))
+        
+        print(f"Model loaded from {folder_path}")
+        return model
 
-def svd_predict(user_item_matrix, user_id, business_id, svd_model):
-    """SVD-based prediction"""
-    # Check if user or business is not in the matrix
-    if user_id not in user_item_matrix.index or business_id not in user_item_matrix.columns:
-        return 3.5  # Return average rating if user or business is not in training data
+# Load and prepare the data
+def prepare_data(file_path, sample_size=None):
+    """
+    Load and prepare the data, with optional sampling for memory constraints
+    """
+    print("Loading data...")
+    # Load data with lower memory usage
+    dtypes = {
+        'user_id': 'str', 
+        'business_id': 'str',
+        'stars': 'float32',
+        'useful_votes': 'float32',
+        'funny_votes': 'float32',
+        'cool_votes': 'float32'
+    }
     
-    try:
-        # Get user and business indices
-        user_idx = user_item_matrix.index.get_loc(user_id)
-        business_idx = user_item_matrix.columns.get_loc(business_id)
-        
-        # Convert matrix to sparse format
-        from scipy.sparse import csr_matrix
-        user_item_sparse = csr_matrix(user_item_matrix.values)
-        
-        # Get the latent factors
-        user_factors = svd_model.transform(user_item_sparse)[user_idx]
-        business_factors = svd_model.components_[:, business_idx]
-        
-        # Calculate the predicted rating
-        predicted_rating = np.dot(user_factors, business_factors)
-        
-        # Clip the rating to be between 1 and 5
-        predicted_rating = max(1, min(5, predicted_rating))
-        
-        return predicted_rating
-    except:
-        return 3.5  # Return average rating if any issues occur
+    # Read data in chunks if dealing with large files
+    df = pd.read_csv(file_path, dtype=dtypes)
+    
+    # Sample if needed
+    if sample_size is not None and sample_size < len(df):
+        df = df.sample(n=sample_size, random_state=42)
+    
+    # Extract only what we need for collaborative filtering
+    ratings_df = df[['user_id', 'business_id', 'stars']]
+    
+    # Create mappings for user and business IDs to matrix indices
+    user_ids = ratings_df['user_id'].unique()
+    business_ids = ratings_df['business_id'].unique()
+    
+    user_to_idx = {user: idx for idx, user in enumerate(user_ids)}
+    business_to_idx = {business: idx for idx, business in enumerate(business_ids)}
+    
+    # Map IDs to indices
+    ratings_df['user_idx'] = ratings_df['user_id'].map(user_to_idx)
+    ratings_df['business_idx'] = ratings_df['business_id'].map(business_to_idx)
+    
+    # Create sparse ratings matrix
+    ratings = csr_matrix((ratings_df['stars'], 
+                         (ratings_df['user_idx'], ratings_df['business_idx'])),
+                         shape=(len(user_ids), len(business_ids)))
+    
+    return ratings, ratings_df, user_to_idx, business_to_idx
 
-def evaluate_model(model_name, true_ratings, predicted_ratings):
-    """Evaluate model performance using RMSE and MAE"""
-    rmse = np.sqrt(mean_squared_error(true_ratings, predicted_ratings))
-    mae = mean_absolute_error(true_ratings, predicted_ratings)
+# Save ratings matrix
+def save_ratings_matrix(ratings_matrix, file_path="model/ratings_matrix.npz"):
+    """
+    Save ratings matrix to disk
+    """
+    folder_path = os.path.dirname(file_path)
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
     
-    print(f"{model_name} - RMSE: {rmse:.4f}, MAE: {mae:.4f}")
-    
-    return rmse, mae
+    save_npz(file_path, ratings_matrix)
+    print(f"Ratings matrix saved to {file_path}")
 
-# Function to make predictions with each model individually
-def make_individual_predictions(val_data, user_item_df, model_knn, svd_model, sample_size=None):
-    """Make predictions with each model individually and evaluate"""
-    if sample_size and sample_size < len(val_data):
-        val_sample = val_data.sample(sample_size, random_state=42)
-    else:
-        val_sample = val_data
-    print(val_sample)
-    print(val_sample.columns)
+# Load ratings matrix
+def load_ratings_matrix(file_path="model/ratings_matrix.npz"):
+    """
+    Load ratings matrix from disk
+    """
+    ratings_matrix = load_npz(file_path)
+    print(f"Ratings matrix loaded from {file_path}")
+    return ratings_matrix
+
+# Evaluate model
+def evaluate_model(model, ratings_matrix, test_set, method='hybrid'):
+    """
+    Evaluate the model using various metrics
+    """
+    predictions = []
+    actuals = []
     
-    print(f"Making predictions on {len(val_sample)} validation samples...")
-    
-    # Prepare containers for predictions
-    user_based_preds = []
-    item_based_preds = []
-    svd_preds = []
-    
-    # Process in smaller batches to show progress
-    batch_size = 100
-    for i in range(0, len(val_sample), batch_size):
-        batch = val_sample.iloc[i:i+batch_size]
+    for _, row in test_set.iterrows():
+        user_idx = row['user_idx']
+        item_idx = row['business_idx']
+        actual_rating = row['stars']
         
-        batch_user_based = []
-        batch_item_based = []
-        batch_svd = []
+        # Skip if user or item not in training set
+        if user_idx >= ratings_matrix.shape[0] or item_idx >= ratings_matrix.shape[1]:
+            continue
         
-        for _, row in batch.iterrows():
-            user_id = row['user_id']
-            business_id = row['business_id']
-            
-            # User-based CF
-            ub_pred = user_based_cf(user_item_df, user_id, business_id)
-            batch_user_based.append(ub_pred)
-            
-            # Item-based CF
-            try:
-                ib_pred = item_based_cf(user_item_df, user_id, business_id, model_knn)
-                batch_item_based.append(ib_pred)
-            except Exception as e:
-                print(f"Error in item-based CF: {e}")
-                batch_item_based.append(3.5)
-            
-            # SVD
-            try:
-                svd_pred = svd_predict(user_item_df, user_id, business_id, svd_model)
-                batch_svd.append(svd_pred)
-            except Exception as e:
-                print(f"Error in SVD: {e}")
-                batch_svd.append(3.5)
-        
-        # Append batch predictions
-        user_based_preds.extend(batch_user_based)
-        item_based_preds.extend(batch_item_based)
-        svd_preds.extend(batch_svd)
-        
-        print(f"Processed {i+len(batch)}/{len(val_sample)} predictions")
+        pred_rating = model.predict(ratings_matrix, user_idx, item_idx, method)
+        predictions.append(pred_rating)
+        actuals.append(actual_rating)
     
-    # Evaluate each model
-    true_ratings = val_sample['stars'].values
+    # Calculate metrics
+    rmse = np.sqrt(mean_squared_error(actuals, predictions))
+    mae = mean_absolute_error(actuals, predictions)
     
-    print("\nModel Evaluation Results:")
-    evaluate_model("User-based CF", true_ratings, user_based_preds)
-    evaluate_model("Item-based CF", true_ratings, item_based_preds)
-    evaluate_model("SVD", true_ratings, svd_preds)
+    # Calculate additional metrics
+    mse = mean_squared_error(actuals, predictions)
     
-    # Try simple ensemble (average of all models)
-    ensemble_preds = [(u + i + s) / 3 for u, i, s in zip(user_based_preds, item_based_preds, svd_preds)]
-    evaluate_model("Ensemble (Simple Average)", true_ratings, ensemble_preds)
-    
-    # Try weighted ensemble
-    weights = [0.4, 0.3, 0.3]  # Same as in your original script
-    weighted_preds = [(u*weights[0] + i*weights[1] + s*weights[2]) 
-                      for u, i, s in zip(user_based_preds, item_based_preds, svd_preds)]
-    evaluate_model("Ensemble (Weighted Average)", true_ratings, weighted_preds)
+    # Calculate correlation between predicted and actual ratings
+    correlation = np.corrcoef(predictions, actuals)[0, 1]
     
     return {
-        'user_based': user_based_preds,
-        'item_based': item_based_preds,
-        'svd': svd_preds,
-        'ensemble': ensemble_preds,
-        'weighted': weighted_preds
+        'RMSE': rmse,
+        'MAE': mae,
+        'MSE': mse,
+        'Correlation': correlation
     }
 
-# Run the evaluation
-print("Starting model evaluation...")
-# Limit to 1000 samples for faster execution
-results = make_individual_predictions(val_data, user_item_df, model_knn, svd_model, sample_size=1000)
+# Example usage with model saving and loading
+def main():
+    # Replace with your actual file path
+    file_path =  os.path.join(os.path.dirname(os.getcwd()),"data/preprocessed_data/train_features.csv")
+    model_dir = os.path.join(os.path.dirname(os.getcwd()),"model")
+    
+    # For memory constraints, sample the data
+    sample_size = 50000  # Adjust based on your machine's memory
+    
+    # Check if model exists
+    if os.path.exists(os.path.join(model_dir, "model_params.pkl")):
+        print("Loading existing model...")
+        model = MemoryEfficientCF.load_model(model_dir)
+        ratings_matrix = load_ratings_matrix(os.path.join(model_dir, "ratings_matrix.npz"))
+        
+        # Load test data for evaluation
+        _, ratings_df, _, _ = prepare_data(file_path, sample_size)
+        _, test_df = train_test_split(ratings_df, test_size=0.2, random_state=42)
+    else:
+        print("Training new model...")
+        # Prepare data
+        ratings_matrix, ratings_df, user_to_idx, business_to_idx = prepare_data(file_path, sample_size)
+        
+        # Split into train and test sets
+        train_df, test_df = train_test_split(ratings_df, test_size=0.2, random_state=42)
+        
+        # Create new training matrix
+        train_matrix = csr_matrix((train_df['stars'], 
+                                  (train_df['user_idx'], train_df['business_idx'])),
+                                  shape=ratings_matrix.shape)
+        
+        # Initialize and train model
+        model = MemoryEfficientCF(n_neighbors=20)
+        model.fit(train_matrix)
+        model.set_mappings(user_to_idx, business_to_idx)
+        
+        # Save model and ratings matrix
+        model.save_model(model_dir)
+        save_ratings_matrix(train_matrix, os.path.join(model_dir, "ratings_matrix.npz"))
+        
+        ratings_matrix = train_matrix
+    
+    # Evaluate model
+    print("Evaluating user-based CF...")
+    user_metrics = evaluate_model(model, ratings_matrix, test_df, 'user')
+    print(f"User-based metrics: {user_metrics}")
+    
+    print("Evaluating item-based CF...")
+    item_metrics = evaluate_model(model, ratings_matrix, test_df, 'item')
+    print(f"Item-based metrics: {item_metrics}")
+    
+    print("Evaluating hybrid CF...")
+    hybrid_metrics = evaluate_model(model, ratings_matrix, test_df, 'hybrid')
+    print(f"Hybrid metrics: {hybrid_metrics}")
+    
+    # Example recommendation for a user
+    if model.user_to_idx is not None:
+        # Get a sample user ID
+        sample_user_id = list(model.user_to_idx.keys())[0]
+        user_idx = model.user_to_idx[sample_user_id]
+        
+        print(f"\nGenerating recommendations for user: {sample_user_id}")
+        recommended_items = model.recommend_top_n(ratings_matrix, user_idx, n=5, method='hybrid')
+        
+        print("\nTop recommendations:")
+        for item_idx, predicted_rating in recommended_items:
+            business_id = model.idx_to_business[item_idx]
+            print(f"Business ID: {business_id}, Predicted Rating: {predicted_rating:.2f}")
 
-# Optionally, create a submission file with the best performing model
-# (Check which model had the best RMSE and use that one)
-print("\nYou can now create a submission file using the best performing model.")
+# Function to recommend for a specific user
+def recommend_for_user(user_id, n=5, method='hybrid', model_dir='recommendation_model'):
+    """
+    Generate recommendations for a specific user
+    """
+    # Load model and data
+    model = MemoryEfficientCF.load_model(model_dir)
+    ratings_matrix = load_ratings_matrix(os.path.join(model_dir, "ratings_matrix.npz"))
+    
+    # Check if user exists
+    if user_id not in model.user_to_idx:
+        print(f"User {user_id} not found in training data")
+        return []
+    
+    user_idx = model.user_to_idx[user_id]
+    recommended_items = model.recommend_top_n(ratings_matrix, user_idx, n=n, method=method)
+    
+    # Format results
+    recommendations = []
+    for item_idx, predicted_rating in recommended_items:
+        business_id = model.idx_to_business[item_idx]
+        recommendations.append({
+            'business_id': business_id,
+            'predicted_rating': predicted_rating
+        })
+    
+    return recommendations
+
+if __name__ == "__main__":
+    main()
+    
+    # Example of how to use the recommend_for_user function
+    # user_id = "rLtl8ZkDX5vH5nAx9C3q5Q"  # Replace with an actual user ID
+    # recommendations = recommend_for_user(user_id, n=10)
+    # print(f"\nRecommendations for user {user_id}:")
+    # for i, rec in enumerate(recommendations, 1):
+    #     print(f"{i}. Business: {rec['business_id']}, Predicted Rating: {rec['predicted_rating']:.2f}")
+    
+
+    
