@@ -314,9 +314,12 @@ def prepare_final_datasets(review_df, enhanced_user_df, enhanced_business_df):
     train_reviews = review_df[review_df['in_train'] == True].copy()
     test_reviews = review_df[review_df['in_train'] == False].copy()
     
+    # Save target values separately for training data
+    train_target = train_reviews['stars'].copy()
+    
     # Create feature dataframes by merging with user and business features
-    # Training features
-    train_features = train_reviews[['user_id', 'business_id', 'stars']].copy()
+    # Training features - remove stars as it's the target
+    train_features = train_reviews[['user_id', 'business_id']].copy()
     
     # Test features
     test_features = test_reviews[['user_id', 'business_id']].copy()
@@ -338,7 +341,10 @@ def prepare_final_datasets(review_df, enhanced_user_df, enhanced_business_df):
     train_features = train_features.fillna(0)
     test_features = test_features.fillna(0)
     
-    return train_features, test_features
+    # Add the target back to training features for convenience
+    train_features['stars'] = train_target
+    
+    return train_features, test_features, train_target.mean()
 
 def main():
     """Main function to run the preprocessing pipeline."""
@@ -356,7 +362,7 @@ def main():
     enhanced_business_df = create_business_features(review_df, business_df, checkin_df)
     
     # Prepare final datasets
-    train_features, test_features = prepare_final_datasets(review_df, enhanced_user_df, enhanced_business_df)
+    train_features, test_features, mean_rating = prepare_final_datasets(review_df, enhanced_user_df, enhanced_business_df)
     
     # Save all processed data
     print(f"Saving processed data to {OUTPUT_PATH}...")
@@ -383,7 +389,7 @@ def main():
     # Prepare a sample submission file
     sample_submission = test_features[['user_id', 'business_id']].copy()
     # Default prediction (mean of training ratings)
-    sample_submission['stars'] = train_features['stars'].mean()
+    sample_submission['stars'] = mean_rating
     sample_submission.to_csv(os.path.join(OUTPUT_PATH, 'sample_submission.csv'), index=False)
     
     end_time = datetime.now()
