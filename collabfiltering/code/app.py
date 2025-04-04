@@ -11,7 +11,7 @@ import requests
 from io import BytesIO
 
 # Import the collaborative filtering model
-from collaborative_filtering import MemoryEfficientCF, load_ratings_matrix, recommend_for_user
+from utils import MemoryEfficientCF, load_ratings_matrix, recommend_for_user
 
 # Set page config
 st.set_page_config(
