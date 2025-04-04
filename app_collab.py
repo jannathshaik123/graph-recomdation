@@ -4,272 +4,384 @@ import numpy as np
 import os
 import pickle
 from scipy.sparse import load_npz
-import sys
 import matplotlib.pyplot as plt
+import seaborn as sns
+from PIL import Image
+import requests
+from io import BytesIO
 
-# Import the collaborative filtering class from the provided code
-# You'll need to make sure this file is in the same directory
-from collaborative_filtering import MemoryEfficientCF, load_ratings_matrix
+# Import the collaborative filtering model
+from collaborative_filtering import MemoryEfficientCF, load_ratings_matrix, recommend_for_user
 
-st.set_page_config(page_title="Restaurant Recommender System", layout="wide")
+# Set page config
+st.set_page_config(
+    page_title="Yelp Recommender System",
+    page_icon="🍽️",
+    layout="wide"
+)
 
-# App title and description
-st.title("Restaurant Recommendation System")
-st.markdown("""
-This application demonstrates a memory-efficient collaborative filtering recommendation system.
-Select a user to see personalized restaurant recommendations based on their previous ratings and similar users' preferences.
-""")
+# Define paths
+MODEL_DIR = os.path.join(os.path.dirname(os.getcwd()),"model")
+BUSINESS_DATA_PATH = r'extract\business_data.csv'  # We'll need to create this
+USER_DATA_PATH = r'extract\user_data.csv'          # We'll need to create this
 
-# Function to load the model and necessary data
+# Load model and matrices
 @st.cache_resource
-def load_model_and_data(model_dir=os.path.join(os.path.dirname(os.getcwd()),"model")):
-    """Load the trained model and additional business data"""
+def load_model():
     try:
-        # Load the collaborative filtering model
-        model = MemoryEfficientCF.load_model(model_dir)
-        ratings_matrix = load_ratings_matrix(os.path.join(model_dir, "ratings_matrix.npz"))
-        
-        # Load business metadata (we'll simulate this data)
-        # In a real application, you would load this from your dataset
-        try:
-            business_metadata = pd.read_csv('business_metadata.csv')
-        except FileNotFoundError:
-            # Create dummy metadata if file doesn't exist
-            st.warning("Business metadata file not found. Creating dummy data for demonstration.")
-            business_ids = list(model.idx_to_business.values())
-            business_metadata = pd.DataFrame({
-                'business_id': business_ids,
-                'name': [f"Restaurant {i+1}" for i in range(len(business_ids))],
-                'city': np.random.choice(['New York', 'Los Angeles', 'Chicago', 'Miami', 'Seattle'], len(business_ids)),
-                'state': np.random.choice(['NY', 'CA', 'IL', 'FL', 'WA'], len(business_ids)),
-                'stars': np.random.uniform(1, 5, len(business_ids)).round(1),
-                'review_count': np.random.randint(10, 1000, len(business_ids))
-            })
-            business_metadata.to_csv('business_metadata.csv', index=False)
-            
-        # Load user metadata (we'll simulate this data)
-        try:
-            user_metadata = pd.read_csv('user_metadata.csv')
-        except FileNotFoundError:
-            # Create dummy metadata if file doesn't exist
-            user_ids = list(model.idx_to_user.values())
-            user_metadata = pd.DataFrame({
-                'user_id': user_ids,
-                'name': [f"User {i+1}" for i in range(len(user_ids))],
-                'review_count': np.random.randint(1, 100, len(user_ids)),
-                'average_stars': np.random.uniform(1, 5, len(user_ids)).round(1)
-            })
-            user_metadata.to_csv('user_metadata.csv', index=False)
-            
-        return model, ratings_matrix, business_metadata, user_metadata
+        model = MemoryEfficientCF.load_model(MODEL_DIR)
+        ratings_matrix = load_ratings_matrix(os.path.join(MODEL_DIR, "ratings_matrix.npz"))
+        return model, ratings_matrix
     except Exception as e:
-        st.error(f"Error loading model and data: {e}")
-        return None, None, None, None
+        st.error(f"Error loading model: {e}")
+        return None, None
 
-# Load the model and data
-model, ratings_matrix, business_metadata, user_metadata = load_model_and_data()
+# Load business and user data
+@st.cache_data
+def load_business_data():
+    if os.path.exists(BUSINESS_DATA_PATH):
+        return pd.read_csv(BUSINESS_DATA_PATH)
+    else:
+        st.warning(f"Business data file not found at {BUSINESS_DATA_PATH}. Only business IDs will be displayed.")
+        return None
 
-# Check if data loaded successfully
-if model is None or ratings_matrix is None:
-    st.error("Failed to load recommendation model. Please check that the model directory exists.")
-    st.stop()
+@st.cache_data
+def load_user_data():
+    if os.path.exists(USER_DATA_PATH):
+        return pd.read_csv(USER_DATA_PATH)
+    else:
+        st.warning(f"User data file not found at {USER_DATA_PATH}. Only user IDs will be displayed.")
+        return None
 
-# Create a sidebar for user selection
-st.sidebar.header("User Selection")
+# Function to get business details
+def get_business_details(business_id, business_df):
+    if business_df is not None and business_id in business_df['business_id'].values:
+        business = business_df[business_df['business_id'] == business_id].iloc[0]
+        return {
+            'name': business.get('name', 'Unknown'),
+            'address': business.get('full_address', 'Unknown'),
+            'city': business.get('city', 'Unknown'),
+            'state': business.get('state', 'Unknown'),
+            'stars': business.get('stars', 'Unknown'),
+            'categories': business.get('categories', 'Unknown')
+        }
+    return {
+        'name': 'Unknown',
+        'address': 'Unknown',
+        'city': 'Unknown',
+        'state': 'Unknown',
+        'stars': 'Unknown',
+        'categories': 'Unknown'
+    }
 
-# Get list of users
-user_list = list(model.user_to_idx.keys())
-user_ids_with_names = []
-
-# Match user IDs with names when possible
-if user_metadata is not None:
-    for user_id in user_list[:100]:  # Limit to first 100 for performance
-        user_name = "Unknown"
-        user_info = user_metadata[user_metadata['user_id'] == user_id]
-        if not user_info.empty:
-            user_name = user_info.iloc[0]['name']
-        user_ids_with_names.append(f"{user_name} ({user_id[:8]}...)")
-
-# If we couldn't create the combined list, just use IDs
-if not user_ids_with_names:
-    # Truncate IDs for display
-    user_ids_with_names = [f"User ({user_id[:8]}...)" for user_id in user_list[:100]]
-
-# Create a selection box with search
-selected_user_display = st.sidebar.selectbox(
-    "Select a user:",
-    options=user_ids_with_names
-)
-
-# Extract the actual user ID from the display string
-selected_user_id = user_list[user_ids_with_names.index(selected_user_display)]
-
-# Method selection
-st.sidebar.header("Recommendation Method")
-method = st.sidebar.radio(
-    "Select recommendation method:",
-    options=["hybrid", "user", "item"],
-    help="User-based uses similar users' ratings. Item-based uses similar items. Hybrid combines both approaches."
-)
-
-# Number of recommendations
-num_recommendations = st.sidebar.slider("Number of recommendations:", 1, 20, 5)
+# Function to get user details
+def get_user_details(user_id, user_df):
+    if user_df is not None and user_id in user_df['user_id'].values:
+        user = user_df[user_df['user_id'] == user_id].iloc[0]
+        return {
+            'name': user.get('name', 'Unknown'),
+            'review_count': user.get('review_count', 'Unknown'),
+            'average_stars': user.get('average_stars', 'Unknown')
+        }
+    return {
+        'name': 'Unknown',
+        'review_count': 'Unknown',
+        'average_stars': 'Unknown'
+    }
 
 # Function to generate recommendations
-def get_recommendations(user_id, n=5, method='hybrid'):
-    """Generate recommendations for the selected user"""
+def generate_recommendations(model, ratings_matrix, user_id, n=5, method='hybrid'):
     if user_id not in model.user_to_idx:
-        return pd.DataFrame()
+        return None, "User not found in the dataset"
     
     user_idx = model.user_to_idx[user_id]
     recommended_items = model.recommend_top_n(ratings_matrix, user_idx, n=n, method=method)
     
-    # Create recommendations dataframe
     recommendations = []
     for item_idx, predicted_rating in recommended_items:
         business_id = model.idx_to_business[item_idx]
+        recommendations.append({
+            'business_id': business_id,
+            'predicted_rating': predicted_rating
+        })
+    
+    return recommendations, None
+
+# Function to visualize user ratings
+def visualize_user_ratings(user_id, model, ratings_matrix, business_df):
+    if user_id not in model.user_to_idx:
+        return None
+    
+    user_idx = model.user_to_idx[user_id]
+    user_ratings = ratings_matrix[user_idx].toarray().flatten()
+    rated_items = np.where(user_ratings > 0)[0]
+    
+    if len(rated_items) == 0:
+        return None
+    
+    ratings = []
+    names = []
+    
+    for item_idx in rated_items:
+        business_id = model.idx_to_business[item_idx]
+        rating = user_ratings[item_idx]
         
-        # Get business info
-        business_info = {"business_id": business_id, "predicted_rating": predicted_rating}
+        business_details = get_business_details(business_id, business_df)
+        business_name = business_details['name']
         
-        # Add metadata if available
-        if business_metadata is not None:
-            business_data = business_metadata[business_metadata['business_id'] == business_id]
-            if not business_data.empty:
-                business = business_data.iloc[0]
-                business_info["name"] = business['name']
-                business_info["city"] = business['city']
-                business_info["state"] = business['state']
-                business_info["avg_stars"] = business['stars']
-                business_info["review_count"] = business['review_count']
+        ratings.append(rating)
+        names.append(business_name if business_name != 'Unknown' else business_id[:10] + '...')
+    
+    # Sort by rating
+    sorted_indices = np.argsort(ratings)[::-1]
+    ratings = [ratings[i] for i in sorted_indices]
+    names = [names[i] for i in sorted_indices]
+    
+    # Limit to top 10 for visibility
+    if len(ratings) > 10:
+        ratings = ratings[:10]
+        names = names[:10]
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    bars = ax.barh(names, ratings, color=sns.color_palette("viridis", len(ratings)))
+    
+    ax.set_xlabel('Rating')
+    ax.set_title(f'Top Ratings by User')
+    ax.set_xlim(0, 5.5)
+    
+    # Add rating values on bars
+    for i, v in enumerate(ratings):
+        ax.text(v + 0.1, i, f"{v}", va='center')
+    
+    plt.tight_layout()
+    return fig
+
+# Main app
+def main():
+    st.title("Yelp Recommender System")
+    
+    # Sidebar
+    st.sidebar.title("Configuration")
+    
+    # Load data and model
+    model, ratings_matrix = load_model()
+    business_df = load_business_data()
+    user_df = load_user_data()
+    
+    if model is None or ratings_matrix is None:
+        st.error("Failed to load model. Please check the model directory.")
+        return
+    
+    # User selection
+    st.sidebar.header("Select User")
+    
+    # Get list of users
+    user_ids = list(model.user_to_idx.keys())
+    
+    # Option to search for user
+    search_method = st.sidebar.radio("User Selection Method", ["Browse Users", "Search by ID"])
+    
+    if search_method == "Browse Users":
+        # Pagination for users
+        users_per_page = 15
+        total_pages = (len(user_ids) + users_per_page - 1) // users_per_page
+        page = st.sidebar.number_input("Page", min_value=1, max_value=total_pages, value=1)
+        
+        start_idx = (page - 1) * users_per_page
+        end_idx = min(start_idx + users_per_page, len(user_ids))
+        
+        displayed_users = user_ids[start_idx:end_idx]
+        
+        # Display user names if available
+        user_options = []
+        for user_id in displayed_users:
+            user_details = get_user_details(user_id, user_df)
+            if user_details['name'] != 'Unknown':
+                user_options.append(f"{user_details['name']} ({user_id})")
             else:
-                business_info["name"] = "Unknown"
-                business_info["city"] = "Unknown"
-                business_info["state"] = "Unknown"
-                business_info["avg_stars"] = 0
-                business_info["review_count"] = 0
+                user_options.append(user_id)
         
-        recommendations.append(business_info)
-    
-    return pd.DataFrame(recommendations)
-
-# Get user info
-user_info = None
-if user_metadata is not None:
-    user_data = user_metadata[user_metadata['user_id'] == selected_user_id]
-    if not user_data.empty:
-        user_info = user_data.iloc[0]
-
-# Display user information
-col1, col2 = st.columns([1, 2])
-
-with col1:
-    st.subheader("User Information")
-    if user_info is not None:
-        st.write(f"**Name:** {user_info['name']}")
-        st.write(f"**User ID:** {selected_user_id}")
-        st.write(f"**Review Count:** {user_info['review_count']}")
-        st.write(f"**Average Rating:** {user_info['average_stars']:.1f} ⭐")
+        selected_user_option = st.sidebar.selectbox("Select User", user_options)
+        
+        # Extract user_id from selected option
+        if "(" in selected_user_option and ")" in selected_user_option:
+            selected_user_id = selected_user_option.split("(")[1].split(")")[0]
+        else:
+            selected_user_id = selected_user_option
     else:
-        st.write(f"**User ID:** {selected_user_id}")
-        st.write("No additional user information available.")
-
-# Get recommendations when user clicks the button
-if st.button("Generate Recommendations"):
-    with st.spinner("Generating recommendations..."):
-        recommendations_df = get_recommendations(selected_user_id, n=num_recommendations, method=method)
-    
-    # Display recommendations
-    if not recommendations_df.empty:
-        st.subheader(f"Top {num_recommendations} Recommended Restaurants")
+        # Search by ID
+        search_query = st.sidebar.text_input("Enter User ID")
         
-        # Display recommendations in cards
-        for i, (_, rec) in enumerate(recommendations_df.iterrows()):
-            col1, col2 = st.columns([1, 3])
+        # Filter users based on search
+        if search_query:
+            matching_users = [user_id for user_id in user_ids if search_query.lower() in user_id.lower()]
             
-            with col1:
-                # Display prediction score as a gauge chart
-                fig, ax = plt.subplots(figsize=(3, 3))
-                ax.pie([rec['predicted_rating'], 5-rec['predicted_rating']], 
-                       colors=['#1f77b4', '#f0f0f0'], 
-                       startangle=90, 
-                       counterclock=False,
-                       wedgeprops={'width': 0.3, 'edgecolor': 'w'})
-                ax.text(0, 0, f"{rec['predicted_rating']:.1f}", ha='center', va='center', fontsize=20)
-                ax.set_title("Predicted Rating", pad=10)
-                ax.axis('equal')
-                st.pyplot(fig)
-
-            with col2:
-                if 'name' in rec:
-                    st.markdown(f"### {i+1}. {rec['name']}")
+            if not matching_users:
+                st.sidebar.warning("No matching users found.")
+                return
+            
+            # Display user names if available
+            user_options = []
+            for user_id in matching_users[:20]:  # Limit to 20 results
+                user_details = get_user_details(user_id, user_df)
+                if user_details['name'] != 'Unknown':
+                    user_options.append(f"{user_details['name']} ({user_id})")
                 else:
-                    st.markdown(f"### {i+1}. Restaurant {rec['business_id'][:8]}...")
-                
-                col_a, col_b, col_c = st.columns(3)
-                with col_a:
-                    if 'city' in rec and 'state' in rec:
-                        st.write(f"📍 {rec['city']}, {rec['state']}")
-                    else:
-                        st.write("📍 Location unknown")
-                
-                with col_b:
-                    if 'avg_stars' in rec:
-                        st.write(f"⭐ {rec['avg_stars']:.1f} (avg rating)")
-                    else:
-                        st.write("⭐ No ratings")
-                        
-                with col_c:
-                    if 'review_count' in rec:
-                        st.write(f"📝 {rec['review_count']} reviews")
-                    else:
-                        st.write("📝 No reviews")
-                
-                st.write(f"**Business ID:** {rec['business_id']}")
-                st.write(f"**Predicted Rating:** {rec['predicted_rating']:.2f}")
+                    user_options.append(user_id)
             
-            st.divider()
-    else:
-        st.warning("No recommendations could be generated for this user.")
+            selected_user_option = st.sidebar.selectbox("Matching Users", user_options)
+            
+            # Extract user_id from selected option
+            if "(" in selected_user_option and ")" in selected_user_option:
+                selected_user_id = selected_user_option.split("(")[1].split(")")[0]
+            else:
+                selected_user_id = selected_user_option
+        else:
+            st.sidebar.info("Enter a search term to find users.")
+            return
+    
+    # Recommendation settings
+    st.sidebar.header("Recommendation Settings")
+    num_recommendations = st.sidebar.slider("Number of Recommendations", 1, 20, 5)
+    method = st.sidebar.radio("Recommendation Method", ["hybrid", "user", "item"], format_func=lambda x: x.capitalize() + " Filtering")
+    
+    # Generate recommendations button
+    if st.sidebar.button("Generate Recommendations"):
+        # Display user information
+        st.header("User Information")
+        user_details = get_user_details(selected_user_id, user_df)
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("User Name", user_details['name'])
+        with col2:
+            st.metric("User ID", selected_user_id)
+        with col3:
+            st.metric("Average Stars", user_details['average_stars'] if user_details['average_stars'] != 'Unknown' else "N/A")
+        
+        # Generate recommendations
+        recommendations, error_message = generate_recommendations(
+            model, ratings_matrix, selected_user_id, n=num_recommendations, method=method
+        )
+        
+        if error_message:
+            st.error(error_message)
+            return
+        
+        # Show recommendations
+        st.header(f"Top {num_recommendations} Recommendations")
+        
+        # Visualization of user ratings
+        st.subheader("User Rating History")
+        rating_chart = visualize_user_ratings(selected_user_id, model, ratings_matrix, business_df)
+        
+        if rating_chart:
+            st.pyplot(rating_chart)
+        else:
+            st.info("No rating history available for this user.")
+        
+        # Display recommendations
+        st.subheader("Recommended Businesses")
+        
+        # Display as cards in grid
+        cols = st.columns(3)
+        
+        for i, rec in enumerate(recommendations):
+            business_id = rec['business_id']
+            predicted_rating = rec['predicted_rating']
+            
+            # Get business details
+            business_details = get_business_details(business_id, business_df)
+            
+            # Format categories
+            categories = business_details['categories']
+            if isinstance(categories, str) and categories != 'Unknown':
+                try:
+                    categories = eval(categories)  # Convert string representation of list to actual list
+                    categories = ", ".join(categories) if isinstance(categories, list) else categories
+                except:
+                    pass
+            
+            with cols[i % 3]:
+                st.markdown(f"""
+                <div style="border:1px solid #dddddd; padding:15px; border-radius:10px; margin-bottom:20px; background-color:#f8f9fa;">
+                    <h3 style="color:#1e88e5;">{business_details['name'] if business_details['name'] != 'Unknown' else 'Business ' + business_id[:8] + '...'}</h3>
+                    <p><strong>Predicted Rating:</strong> ⭐ {predicted_rating:.2f}/5.0</p>
+                    <p><strong>Actual Rating:</strong> {'⭐ ' + str(business_details['stars']) + '/5.0' if business_details['stars'] != 'Unknown' else 'Unknown'}</p>
+                    <p><strong>Location:</strong> {business_details['city']}, {business_details['state']}</p>
+                    <p><strong>Categories:</strong> {categories}</p>
+                    <p><strong>Business ID:</strong> {business_id}</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Add explanation of recommendation method
+        st.header("How the Recommendation Works")
+        
+        if method == 'hybrid':
+            st.write("""
+            ### Hybrid Collaborative Filtering
+            
+            This recommendation combines both user-based and item-based collaborative filtering approaches 
+            to provide balanced recommendations that consider both similar users and similar items.
+            
+            - **User-based component**: Finds users with similar taste profiles and recommends items they liked
+            - **Item-based component**: Finds businesses similar to those the user has highly rated
+            - **Final score**: The average of both approaches
+            """)
+        elif method == 'user':
+            st.write("""
+            ### User-Based Collaborative Filtering
+            
+            This recommendation method finds users with similar taste profiles to the selected user,
+            then recommends businesses that these similar users have rated highly.
+            
+            The system calculates similarity between users based on their rating patterns.
+            """)
+        else:  # item-based
+            st.write("""
+            ### Item-Based Collaborative Filtering
+            
+            This recommendation method finds businesses similar to those the user has already rated highly.
+            
+            The system calculates similarity between businesses based on how users have rated them.
+            """)
+        
+        # Display evaluation metrics
+        st.header("Model Performance Metrics")
+        
+        metrics_data = {
+            "Metric": ["RMSE", "MAE", "Correlation"],
+            "User-based": [1.63, 1.17, 0.17],
+            "Item-based": [2.39, 1.75, 0.04],
+            "Hybrid": [1.68, 1.30, 0.13]
+        }
+        
+        metrics_df = pd.DataFrame(metrics_data)
+        
+        # Create a bar chart for the metrics
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        bar_width = 0.25
+        x = np.arange(len(metrics_df["Metric"]))
+        
+        ax.bar(x - bar_width, metrics_df["User-based"], width=bar_width, label="User-based")
+        ax.bar(x, metrics_df["Item-based"], width=bar_width, label="Item-based")
+        ax.bar(x + bar_width, metrics_df["Hybrid"], width=bar_width, label="Hybrid")
+        
+        ax.set_ylabel("Value")
+        ax.set_title("Model Performance Metrics")
+        ax.set_xticks(x)
+        ax.set_xticklabels(metrics_df["Metric"])
+        ax.legend()
+        
+        plt.tight_layout()
+        st.pyplot(fig)
+        
+        st.write("""
+        - **RMSE (Root Mean Square Error)**: Lower is better. Measures prediction accuracy.
+        - **MAE (Mean Absolute Error)**: Lower is better. Average absolute difference between predicted and actual ratings.
+        - **Correlation**: Higher is better. How well predicted ratings correlate with actual ratings.
+        """)
 
-# Display explanations of the recommendation algorithms
-with st.expander("How do the recommendation methods work?"):
-    st.markdown("""
-    ### Recommendation Methods
-    
-    **User-based Collaborative Filtering**
-    - Finds users similar to the selected user
-    - Recommends businesses that similar users liked
-    - Works best when many users have rated the same items
-    
-    **Item-based Collaborative Filtering**
-    - Finds businesses similar to those the user has rated highly
-    - Recommends businesses with similar characteristics
-    - Works well when user preferences are consistent
-    
-    **Hybrid Method**
-    - Combines both user-based and item-based recommendations
-    - Often provides more balanced and accurate recommendations
-    - Helps mitigate the limitations of each individual approach
-    """)
-
-with st.expander("About the Evaluation Metrics"):
-    st.markdown("""
-    ### Model Evaluation Metrics
-    
-    The model was evaluated using the following metrics:
-    
-    - **RMSE (Root Mean Square Error)**: Measures the square root of the average squared differences between predicted and actual ratings
-    - **MAE (Mean Absolute Error)**: Measures the average absolute differences between predicted and actual ratings
-    - **Correlation**: Measures how well the predicted ratings correlate with actual ratings
-    
-    Based on the evaluation results, the **user-based** approach performed best for this dataset, followed by the **hybrid** approach.
-    """)
-
-# Footer information
-st.sidebar.markdown("---")
-st.sidebar.markdown("""
-### About This App
-This recommendation system uses collaborative filtering to suggest restaurants based on user ratings. 
-The app demonstrates both user-based and item-based approaches, as well as a hybrid method.
-""")
+if __name__ == "__main__":
+    main()
