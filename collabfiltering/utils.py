@@ -325,8 +325,8 @@ def evaluate_model(model, ratings_matrix, test_set, method='hybrid'):
 # Example usage with model saving and loading
 def main():
     # Replace with your actual file path
-    file_path =  os.path.join(os.path.dirname(os.getcwd()),"data/preprocessed_data/train_features.csv")
-    model_dir = os.path.join(os.path.dirname(os.getcwd()),"model")
+    file_path =  os.path.join(os.path.dirname(os.path.dirname(os.getcwd())),"data/preprocessed_data/train_features.csv")
+    model_dir = "model"
     
     # For memory constraints, sample the data
     sample_size = 50000  # Adjust based on your machine's memory
@@ -392,7 +392,7 @@ def main():
             print(f"Business ID: {business_id}, Predicted Rating: {predicted_rating:.2f}")
 
 # Function to recommend for a specific user
-def recommend_for_user(user_id, n=5, method='hybrid', model_dir='recommendation_model'):
+def recommend_for_user(user_id, n=5, method='hybrid', model_dir='model'):
     """
     Generate recommendations for a specific user
     """

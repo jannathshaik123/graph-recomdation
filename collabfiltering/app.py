@@ -21,7 +21,7 @@ st.set_page_config(
 )
 
 # Define paths
-MODEL_DIR = os.path.join(os.path.dirname(os.getcwd()),"model")
+MODEL_DIR = os.path.join(os.path.dirname(os.getcwd()),"collabfiltering\model")
 BUSINESS_DATA_PATH = r'extract\business_data.csv'  # We'll need to create this
 USER_DATA_PATH = r'extract\user_data.csv'          # We'll need to create this
 

@@ -90,8 +90,9 @@ def extract_user_data(train_path, test_path, output_path=r'extract\user_data.csv
 
 if __name__ == "__main__":
     # Set paths to your data
-    train_path = os.path.join(os.path.dirname(os.getcwd()),"data/yelp_training_set")  # Replace with your paths
-    test_path = os.path.join(os.path.dirname(os.getcwd()),"data/yelp_test_set")        # Replace with your paths
+    #os.path.join(os.path.dirname(os.path.dirname(os.getcwd())), "data")
+    train_path = os.path.join(os.path.dirname(os.path.dirname(os.getcwd())), "data/yelp_training_set")  # Replace with your paths
+    test_path = os.path.join(os.path.dirname(os.path.dirname(os.getcwd())), "data/yelp_test_set")        # Replace with your paths
     
     extract_business_data(train_path, test_path)
     extract_user_data(train_path, test_path)

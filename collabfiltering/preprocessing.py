@@ -7,9 +7,9 @@ import pickle
 
 # Define paths - replace these with your actual paths
 base_path = os.path.join(os.path.dirname(os.path.dirname(os.getcwd())), "data")
-TRAIN_PATH = os.path.join(os.path.dirname(os.getcwd()), "data/yelp_training_set")
-TEST_PATH = os.path.join(os.path.dirname(os.getcwd()), "data/yelp_test_set")
-OUTPUT_PATH = os.path.join(os.path.dirname(os.getcwd()),"data/preprocessed_data")
+TRAIN_PATH = os.path.join(os.path.dirname(os.getcwd()), "yelp_training_set")
+TEST_PATH = os.path.join(os.path.dirname(os.getcwd()), "yelp_test_set")
+OUTPUT_PATH = os.path.join(os.path.dirname(os.getcwd()),"preprocessed_data")
 
 # Create output directory if it doesn't exist
 if not os.path.exists(OUTPUT_PATH):
