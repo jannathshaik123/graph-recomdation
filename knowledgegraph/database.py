@@ -10,11 +10,11 @@ NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "password"  # Change this to your actual password
 
 # Paths to Yelp dataset files
-BUSINESS_FILE = "yelp_training_set/yelp_training_set_business.json"
-REVIEW_FILE = "yelp_training_set/yelp_training_set_review.json"
-USER_FILE = "yelp_training_set/yelp_training_set_user.json"
-CHECKIN_FILE = "yelp_training_set/yelp_training_set_checkin.json"
-
+base_path = os.path.join(os.path.dirname(os.path.dirname(os.getcwd())), "data/yelp_training_set")
+BUSINESS_FILE = os.path.join(base_path,"yelp_training_set_business.json")
+REVIEW_FILE = os.path.join(base_path,"yelp_training_set_review.json")
+USER_FILE = os.path.join(base_path,"yelp_training_set_user.json")
+CHECKIN_FILE = os.path.join(base_path,"yelp_training_set_checkin.json")
 class YelpKnowledgeGraph:
     def __init__(self, uri, user, password):
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
@@ -206,12 +206,16 @@ class YelpKnowledgeGraph:
                 # Parse date
                 date_obj = datetime.strptime(review['date'], '%Y-%m-%d')
                 
+                # Generate a simple unique ID (combination of user_id and business_id with timestamp)
+                # This avoids the need for APOC
+                review_id = f"{review['user_id']}_{review['business_id']}_{date_obj.strftime('%Y%m%d')}"
+                
                 # Create review and relationships
                 session.run("""
                 MATCH (u:User {user_id: $user_id})
                 MATCH (b:Business {business_id: $business_id})
                 CREATE (r:Review {
-                    review_id: apoc.create.uuid(),
+                    review_id: $review_id,
                     stars: $stars,
                     text: $text,
                     date: $date,
@@ -224,6 +228,7 @@ class YelpKnowledgeGraph:
                 """,
                 user_id=review['user_id'],
                 business_id=review['business_id'],
+                review_id=review_id,
                 stars=review['stars'],
                 text=review['text'],
                 date=date_obj.strftime('%Y-%m-%d'),
