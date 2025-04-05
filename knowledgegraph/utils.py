@@ -591,10 +591,17 @@ class YelpRecommender:
         user_cf_recs = self.user_based_cf(train_df, test_users, k)
         item_cf_recs = self.item_based_cf(train_df, test_users, k)
         
-        # Simple content-based filtering using business categories
-        user_to_id = {idx: id for id, idx in enumerate(train_df['user_idx'].unique())}
-        # Convert user indices back to IDs for graph-based recommendation
-        test_user_ids = [user_to_id.get(idx) for idx in test_users if idx in user_to_id]
+        # Create mappings for user and business IDs
+        idx_to_user_id = {}
+        for _, row in train_df.drop_duplicates(subset=['user_idx']).iterrows():
+            idx_to_user_id[row['user_idx']] = row['user_id']
+        
+        business_id_to_idx = {}
+        for _, row in train_df.iterrows():
+            business_id_to_idx[row['business_id']] = row['business_idx']
+        
+        # Convert user indices to IDs for graph-based recommendation
+        test_user_ids = [idx_to_user_id.get(idx) for idx in test_users if idx in idx_to_user_id]
         
         # Use graph-based recommendations from Neo4j
         graph_recs = self.graph_based_recommendation(test_user_ids, max_items=50)
@@ -616,12 +623,13 @@ class YelpRecommender:
                     user_scores[item_idx] += beta * score
             
             # Add graph-based scores (if available)
-            if user_idx in user_to_id and user_to_id[user_idx] in graph_recs:
-                for rec in graph_recs[user_to_id[user_idx]]:
-                    # Need to convert business_id back to index
-                    # This is simplified - you'd need a mapping from business_id to index
-                    normalized_score = rec['score'] / 10  # Normalize score to be between 0-5
-                    user_scores[rec['business_id']] += gamma * normalized_score
+            if user_idx in idx_to_user_id and idx_to_user_id[user_idx] in graph_recs:
+                for rec in graph_recs[idx_to_user_id[user_idx]]:
+                    business_id = rec['business_id']
+                    if business_id in business_id_to_idx:
+                        business_idx = business_id_to_idx[business_id]
+                        normalized_score = min(5, rec['avg_rating'])  # Normalize score to be between 0-5
+                        user_scores[business_idx] += gamma * normalized_score
             
             # Sort and get top recommendations
             sorted_recommendations = sorted(
@@ -637,6 +645,7 @@ class YelpRecommender:
         return hybrid_recommendations
 
     # Evaluation functions
+    ## def evaluate_recommendations(self, recommendations, test_df, top_n=10):
     def evaluate_recommendations(self, recommendations, test_df, top_n=10):
         """
         Evaluate recommendations against test data
@@ -689,7 +698,7 @@ class YelpRecommender:
                     recall_at_n.append(recall)
             
             # Calculate NDCG
-            if len(relevant_items) > 0:
+            if len(relevant_items) > 0 and len(rec_items) > 0:
                 # Create binary relevance vector for recommendations
                 relevance = np.zeros(len(rec_items))
                 for i, item in enumerate(rec_items):
@@ -707,6 +716,9 @@ class YelpRecommender:
             
             for item, score in top_recs:
                 if item in test_ratings[user]:
+                    # Skip inf or NaN scores
+                    if np.isnan(score) or np.isinf(score):
+                        continue
                     pred_ratings.append(score)
                     true_ratings.append(test_ratings[user][item])
             
@@ -714,8 +726,11 @@ class YelpRecommender:
                 mae = np.mean(np.abs(np.array(pred_ratings) - np.array(true_ratings)))
                 rmse = np.sqrt(np.mean((np.array(pred_ratings) - np.array(true_ratings))**2))
                 
-                mae_values.append(mae)
-                rmse_values.append(rmse)
+                # Check for valid values
+                if not (np.isnan(mae) or np.isinf(mae)):
+                    mae_values.append(mae)
+                if not (np.isnan(rmse) or np.isinf(rmse)):
+                    rmse_values.append(rmse)
         
         # Aggregate metrics
         metrics = {
@@ -723,8 +738,8 @@ class YelpRecommender:
             'recall@N': np.mean(recall_at_n) if recall_at_n else 0,
             'ndcg@N': np.mean(ndcg_at_n) if ndcg_at_n else 0,
             'coverage': len(recommendations) / len(test_ratings) if test_ratings else 0,
-            'mae': np.mean(mae_values) if mae_values else float('inf'),
-            'rmse': np.mean(rmse_values) if rmse_values else float('inf')
+            'mae': np.mean(mae_values) if mae_values else np.nan,
+            'rmse': np.mean(rmse_values) if rmse_values else np.nan
         }
         
         # Calculate F1 score
@@ -756,6 +771,7 @@ class YelpRecommender:
         else:
             return 0
 
+    ## def compare_recommendation_methods(self, train_df, test_df, business_features_df, user_sample=100, top_n=10):
     def compare_recommendation_methods(self, train_df, test_df, business_features_df, user_sample=100, top_n=10):
         """
         Compare different recommendation methods
@@ -784,14 +800,17 @@ class YelpRecommender:
         item_cf_recs = self.item_based_cf(train_df, test_users)
         
         # For graph-based, need to map indices back to IDs
-        user_to_id = {row['user_idx']: row['user_id'] for _, row in train_df.iterrows()}
+        user_to_id = {row['user_idx']: row['user_id'] for _, row in train_df.drop_duplicates(subset=['user_idx']).iterrows()}
         test_user_ids = [user_to_id.get(idx) for idx in test_users if idx in user_to_id]
         
         graph_recs_by_id = self.graph_based_recommendation(test_user_ids)
         
         # Convert graph recommendations back to indices format for evaluation
         id_to_idx = {v: k for k, v in user_to_id.items()}
-        business_id_to_idx = {row['business_id']: row['business_idx'] for _, row in train_df.iterrows()}
+        # Create a mapping from business_id to business_idx, handling duplicates
+        business_id_to_idx = {}
+        for _, row in train_df.iterrows():
+            business_id_to_idx[row['business_id']] = row['business_idx']
         
         graph_recs = {}
         for user_id, recs in graph_recs_by_id.items():
@@ -847,12 +866,15 @@ class YelpRecommender:
         for i, metric_name in enumerate(metric_names):
             axes[i].bar(methods, plot_data[metric_name])
             axes[i].set_title(f'{metric_name}')
-            axes[i].set_ylim(0, max(plot_data[metric_name]) * 1.2 + 0.01)
+            # Get the maximum value, ensuring it's a valid number
+            max_val = max([v for v in plot_data[metric_name] if not (np.isnan(v) or np.isinf(v))], default=0.1)
+            axes[i].set_ylim(0, max_val * 1.2 + 0.01)
             axes[i].tick_params(axis='x', rotation=45)
             
             # Add values on top of bars
             for j, value in enumerate(plot_data[metric_name]):
-                axes[i].text(j, value + 0.005, f'{value:.3f}', ha='center')
+                if not (np.isnan(value) or np.isinf(value)):
+                    axes[i].text(j, value + 0.005, f'{value:.3f}', ha='center')
         
         # Plot error metrics (MAE and RMSE)
         error_metrics = ['mae', 'rmse']
@@ -860,21 +882,36 @@ class YelpRecommender:
         for metric_name in error_metrics:
             error_data[metric_name] = [metrics[method][metric_name] for method in methods]
         
-        axes[5].bar(methods, error_data['rmse'])
-        axes[5].set_title('RMSE (lower is better)')
-        axes[5].set_ylim(0, max(error_data['rmse']) * 1.2 + 0.01)
-        axes[5].tick_params(axis='x', rotation=45)
+        # Filter out NaN and Inf values for RMSE
+        valid_rmse = [v for v in error_data['rmse'] if not (np.isnan(v) or np.isinf(v))]
         
-        for j, value in enumerate(error_data['rmse']):
-            axes[5].text(j, value + 0.005, f'{value:.3f}', ha='center')
+        if valid_rmse:  # Check if there are any valid RMSE values
+            max_rmse = max(valid_rmse)
+            axes[5].bar(methods, [v if not (np.isnan(v) or np.isinf(v)) else 0 for v in error_data['rmse']])
+            axes[5].set_title('RMSE (lower is better)')
+            axes[5].set_ylim(0, max_rmse * 1.2 + 0.01)
+            axes[5].tick_params(axis='x', rotation=45)
+            
+            for j, value in enumerate(error_data['rmse']):
+                if not (np.isnan(value) or np.isinf(value)):
+                    axes[5].text(j, value + 0.005, f'{value:.3f}', ha='center')
+        else:
+            axes[5].set_title('RMSE (No valid data)')
         
         plt.tight_layout()
-        plt.savefig('recommendation_metrics.png')
+        plt.savefig(os.path.join(self.models_folder, 'recommendation_metrics.png'))
         plt.close()
         
         # More detailed table of metrics
         metrics_table = pd.DataFrame(metrics).T
-        metrics_table = metrics_table.round(4)
+        
+        # Replace NaN and Inf values with a placeholder for display
+        metrics_table = metrics_table.replace([np.inf, -np.inf], np.nan)
+        metrics_table = metrics_table.fillna('N/A')
+        
+        # Round only numeric values
+        for col in metrics_table.columns:
+            metrics_table[col] = metrics_table[col].apply(lambda x: round(x, 4) if isinstance(x, (int, float)) else x)
         
         return metrics_table
     
