@@ -192,10 +192,10 @@ class YelpRecommender:
             LIMIT $max_items
             
             RETURN rec_business.business_id as business_id, 
-                   rec_business.name as name,
-                   rec_business.stars as avg_rating,
-                   score,
-                   matched_categories
+                rec_business.name as name,
+                rec_business.stars as avg_rating,
+                score,
+                matched_categories
             """,
             
             'collaborative': """
@@ -203,23 +203,23 @@ class YelpRecommender:
             <-[:ABOUT]-(r2:Review)<-[:WROTE]-(u2:User)
             WHERE r1.stars >= 4 AND r2.stars >= 4 AND u1 <> u2
             
-            WITH u2, count(distinct b) as common_likes
+            WITH u1, u2, count(distinct b) as common_likes
             ORDER BY common_likes DESC
             LIMIT 10
             
             MATCH (u2)-[:WROTE]->(r:Review)-[:ABOUT]->(rec_business:Business)
             WHERE r.stars >= 4
-            AND NOT EXISTS((u1:User {user_id: $user_id})-[:WROTE]->(:Review)-[:ABOUT]->(rec_business))
+            AND NOT EXISTS((u1)-[:WROTE]->(:Review)-[:ABOUT]->(rec_business))
             
             WITH rec_business, sum(common_likes) as score
             ORDER BY score DESC, rec_business.stars DESC
             LIMIT $remaining
             
             RETURN rec_business.business_id as business_id,
-                   rec_business.name as name,
-                   rec_business.stars as avg_rating,
-                   score,
-                   [] as matched_categories
+                rec_business.name as name,
+                rec_business.stars as avg_rating,
+                score,
+                [] as matched_categories
             """
         }
         
@@ -483,7 +483,6 @@ class YelpRecommender:
         return recommendations
         
 
-    # Let's update the graph_based_recommendation method to save the queries
     def graph_based_recommendation(self, test_users, max_items=10, save_model=True):
         """
         Graph-based recommendation using Neo4j's graph algorithms
@@ -531,18 +530,19 @@ class YelpRecommender:
                 
                 # If not enough category-based recommendations, supplement with collaborative approach
                 if len(user_recs) < max_items:
+                    # FIX: Store the user in a variable first and then reuse it in the NOT EXISTS clause
                     collab_result = session.run("""
                     MATCH (u1:User {user_id: $user_id})-[:WROTE]->(r1:Review)-[:ABOUT]->(b:Business)
                     <-[:ABOUT]-(r2:Review)<-[:WROTE]-(u2:User)
                     WHERE r1.stars >= 4 AND r2.stars >= 4 AND u1 <> u2
                     
-                    WITH u2, count(distinct b) as common_likes
+                    WITH u1, u2, count(distinct b) as common_likes
                     ORDER BY common_likes DESC
                     LIMIT 10
                     
                     MATCH (u2)-[:WROTE]->(r:Review)-[:ABOUT]->(rec_business:Business)
                     WHERE r.stars >= 4
-                    AND NOT EXISTS((u1:User {user_id: $user_id})-[:WROTE]->(:Review)-[:ABOUT]->(rec_business))
+                    AND NOT EXISTS((u1)-[:WROTE]->(:Review)-[:ABOUT]->(rec_business))
                     
                     WITH rec_business, sum(common_likes) as score
                     ORDER BY score DESC, rec_business.stars DESC
@@ -877,13 +877,12 @@ class YelpRecommender:
         metrics_table = metrics_table.round(4)
         
         return metrics_table
-
-# Now update the main function to save mappings and evaluation metrics
+    
 def main():
     # Neo4j connection details
     NEO4J_URI = "bolt://localhost:7687"
     NEO4J_USER = "neo4j"
-    NEO4J_PASSWORD = "password"  # Change to your actual password
+    NEO4J_PASSWORD = "password" 
     
     # Create recommender with a specified models folder
     models_folder = 'models'
