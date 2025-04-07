@@ -67,7 +67,7 @@ class YelpRecommender:
             
     def preprocess_data(self, ratings_df, test_size=0.2, random_state=42):
         """
-        Split data into training and testing sets
+        Split data into training and testing sets with improved train/test split
         """
         # Sort by date to ensure train data comes before test data
         ratings_df = ratings_df.sort_values('date')
@@ -83,15 +83,34 @@ class YelpRecommender:
         ratings_df['user_idx'] = ratings_df['user_id'].map(user_to_idx)
         ratings_df['business_idx'] = ratings_df['business_id'].map(business_to_idx)
         
-        # Split data into training and testing
-        train_df, test_df = train_test_split(
-            ratings_df, 
-            test_size=test_size, 
-            random_state=random_state,
-            stratify=ratings_df['rating']  # Stratify by rating to maintain rating distribution
-        )
+        # Filter out users with too few ratings for proper train/test split
+        # Count ratings per user
+        user_rating_counts = ratings_df['user_idx'].value_counts()
+        
+        # Only keep users with at least 5 ratings to ensure they have data in both train and test
+        users_with_enough_ratings = user_rating_counts[user_rating_counts >= 5].index
+        print(f"Filtering from {len(user_rating_counts)} users to {len(users_with_enough_ratings)} users with at least 5 ratings")
+        
+        filtered_df = ratings_df[ratings_df['user_idx'].isin(users_with_enough_ratings)]
+        
+        # Split data based on users to ensure each user has both train and test data
+        # Create a user-based train/test split to ensure each user has test data
+        train_df = pd.DataFrame()
+        test_df = pd.DataFrame()
+        
+        # Group by user
+        grouped = filtered_df.groupby('user_idx')
+        
+        for user_idx, user_ratings in grouped:
+            # Split this user's ratings into train/test (keeping chronological order)
+            user_train = user_ratings.iloc[:int(len(user_ratings) * (1 - test_size))]
+            user_test = user_ratings.iloc[int(len(user_ratings) * (1 - test_size)):]
+            
+            train_df = pd.concat([train_df, user_train])
+            test_df = pd.concat([test_df, user_test])
         
         print(f"Training set: {len(train_df)}, Testing set: {len(test_df)}")
+        print(f"Number of users in train: {train_df['user_idx'].nunique()}, in test: {test_df['user_idx'].nunique()}")
         
         return train_df, test_df, user_to_idx, business_to_idx
     
@@ -648,7 +667,7 @@ class YelpRecommender:
     ## def evaluate_recommendations(self, recommendations, test_df, top_n=10):
     def evaluate_recommendations(self, recommendations, test_df, top_n=10):
         """
-        Evaluate recommendations against test data
+        Improved evaluation of recommendations against test data
         
         Parameters:
         - recommendations: Dictionary of user_idx -> [(item_idx, score), ...]
@@ -669,6 +688,9 @@ class YelpRecommender:
                 test_ratings[user] = {}
             test_ratings[user][item] = rating
         
+        # Use a lower threshold for what's considered "relevant" (3.5 instead of 4)
+        relevance_threshold = 3.5
+        
         # Calculate metrics
         precision_at_n = []
         recall_at_n = []
@@ -676,20 +698,28 @@ class YelpRecommender:
         mae_values = []
         rmse_values = []
         
+        evaluated_users = 0
+        users_with_hits = 0
+        
         for user, user_recs in recommendations.items():
-            if user not in test_ratings:
+            if user not in test_ratings or not user_recs:
                 continue
-                
+            
+            evaluated_users += 1
+            
             # Get top-N recommendations
             top_recs = user_recs[:top_n]
             rec_items = [item for item, _ in top_recs]
             
-            # Get relevant items (rated 4 or higher in test set)
-            relevant_items = {item for item, rating in test_ratings[user].items() if rating >= 4}
+            # Get relevant items (rated at or above threshold in test set)
+            relevant_items = {item for item, rating in test_ratings[user].items() if rating >= relevance_threshold}
             
             # Calculate precision and recall
             if len(rec_items) > 0:
                 hits = len(set(rec_items) & relevant_items)
+                if hits > 0:
+                    users_with_hits += 1
+                    
                 precision = hits / len(rec_items)
                 precision_at_n.append(precision)
                 
@@ -699,11 +729,12 @@ class YelpRecommender:
             
             # Calculate NDCG
             if len(relevant_items) > 0 and len(rec_items) > 0:
-                # Create binary relevance vector for recommendations
+                # Create graded relevance vector for recommendations
                 relevance = np.zeros(len(rec_items))
                 for i, item in enumerate(rec_items):
-                    if item in relevant_items:
-                        relevance[i] = 1
+                    if item in test_ratings[user]:
+                        # Use the actual rating as relevance score
+                        relevance[i] = max(0, test_ratings[user][item] - 2)  # Scale ratings 1-5 to relevance 0-3
                 
                 # If we have relevant items, calculate NDCG
                 if np.sum(relevance) > 0:
@@ -719,7 +750,10 @@ class YelpRecommender:
                     # Skip inf or NaN scores
                     if np.isnan(score) or np.isinf(score):
                         continue
-                    pred_ratings.append(score)
+                        
+                    # Clamp predicted scores to the rating range [1-5]
+                    clamped_score = min(5, max(1, score))
+                    pred_ratings.append(clamped_score)
                     true_ratings.append(test_ratings[user][item])
             
             if len(pred_ratings) > 0:
@@ -732,12 +766,17 @@ class YelpRecommender:
                 if not (np.isnan(rmse) or np.isinf(rmse)):
                     rmse_values.append(rmse)
         
+        # Add diagnostic information
+        print(f"Evaluated {evaluated_users} users, {users_with_hits} had at least one hit")
+        print(f"Average hits per user: {np.mean([len(set(recommendations.get(u, [])[:top_n]) & {item for item, rating in test_ratings[u].items() if rating >= relevance_threshold}) for u in test_ratings if u in recommendations]) if evaluated_users > 0 else 0}")
+        
         # Aggregate metrics
         metrics = {
             'precision@N': np.mean(precision_at_n) if precision_at_n else 0,
             'recall@N': np.mean(recall_at_n) if recall_at_n else 0,
             'ndcg@N': np.mean(ndcg_at_n) if ndcg_at_n else 0,
             'coverage': len(recommendations) / len(test_ratings) if test_ratings else 0,
+            'hit_rate': users_with_hits / evaluated_users if evaluated_users > 0 else 0,
             'mae': np.mean(mae_values) if mae_values else np.nan,
             'rmse': np.mean(rmse_values) if rmse_values else np.nan
         }
@@ -774,7 +813,7 @@ class YelpRecommender:
     ## def compare_recommendation_methods(self, train_df, test_df, business_features_df, user_sample=100, top_n=10):
     def compare_recommendation_methods(self, train_df, test_df, business_features_df, user_sample=100, top_n=10):
         """
-        Compare different recommendation methods
+        Compare different recommendation methods with improved evaluation
         
         Parameters:
         - train_df: Training data
@@ -786,47 +825,91 @@ class YelpRecommender:
         Returns:
         - Dictionary of evaluation results for each method
         """
-        # Sample users to evaluate
+        # Only sample users who have ratings in the test set
+        test_user_set = set(test_df['user_idx'].unique())
+        train_user_set = set(train_df['user_idx'].unique())
+        eligible_users = list(test_user_set & train_user_set)
+        
+        if len(eligible_users) == 0:
+            print("ERROR: No users found with ratings in both train and test sets")
+            return {}
+        
+        # Sample users to evaluate (users must have ratings in the test set)
         test_users = np.random.choice(
-            test_df['user_idx'].unique(), 
-            min(user_sample, len(test_df['user_idx'].unique())), 
+            eligible_users, 
+            min(user_sample, len(eligible_users)), 
             replace=False
         )
         
         print(f"Evaluating recommendations for {len(test_users)} users")
+        
+        # Verify that our selected users have rating data in the test set
+        test_user_ratings = {}
+        for _, row in test_df.iterrows():
+            user = row['user_idx']
+            if user in test_users:
+                if user not in test_user_ratings:
+                    test_user_ratings[user] = []
+                test_user_ratings[user].append(row['business_idx'])
+        
+        users_with_data = len(test_user_ratings)
+        print(f"Found {users_with_data} users with test data out of {len(test_users)} sampled users")
+        
+        if users_with_data == 0:
+            print("ERROR: No sampled users have ratings in the test set")
+            return {}
         
         # Generate recommendations using different methods
         user_cf_recs = self.user_based_cf(train_df, test_users)
         item_cf_recs = self.item_based_cf(train_df, test_users)
         
         # For graph-based, need to map indices back to IDs
-        user_to_id = {row['user_idx']: row['user_id'] for _, row in train_df.drop_duplicates(subset=['user_idx']).iterrows()}
-        test_user_ids = [user_to_id.get(idx) for idx in test_users if idx in user_to_id]
-        
-        graph_recs_by_id = self.graph_based_recommendation(test_user_ids)
-        
-        # Convert graph recommendations back to indices format for evaluation
-        id_to_idx = {v: k for k, v in user_to_id.items()}
-        # Create a mapping from business_id to business_idx, handling duplicates
-        business_id_to_idx = {}
+        user_idx_to_id = {}
         for _, row in train_df.iterrows():
-            business_id_to_idx[row['business_id']] = row['business_idx']
+            user_idx_to_id[row['user_idx']] = row['user_id']
         
-        graph_recs = {}
-        for user_id, recs in graph_recs_by_id.items():
-            if user_id not in id_to_idx:
-                continue
-                
-            user_idx = id_to_idx[user_id]
-            graph_recs[user_idx] = []
+        test_user_ids = [user_idx_to_id.get(idx) for idx in test_users if idx in user_idx_to_id]
+        
+        # Filter out None values
+        test_user_ids = [user_id for user_id in test_user_ids if user_id is not None]
+        
+        # If there are no valid user IDs, set empty graph recommendations
+        if not test_user_ids:
+            print("WARNING: No valid user IDs found for graph-based recommendations")
+            graph_recs = {}
+        else:
+            graph_recs_by_id = self.graph_based_recommendation(test_user_ids)
             
-            for rec in recs:
-                business_id = rec['business_id']
-                if business_id in business_id_to_idx:
-                    business_idx = business_id_to_idx[business_id]
-                    # Normalize score to be between 0-5
-                    score = min(5, rec['avg_rating'])
-                    graph_recs[user_idx].append((business_idx, score))
+            # Convert graph recommendations back to indices format for evaluation
+            id_to_idx = {v: k for k, v in user_idx_to_id.items() if v is not None}
+            
+            # Create a mapping from business_id to business_idx
+            business_id_to_idx = {}
+            for _, row in train_df.iterrows():
+                business_id_to_idx[row['business_id']] = row['business_idx']
+            
+            graph_recs = {}
+            for user_id, recs in graph_recs_by_id.items():
+                if user_id not in id_to_idx:
+                    continue
+                    
+                user_idx = id_to_idx[user_id]
+                graph_recs[user_idx] = []
+                
+                for rec in recs:
+                    business_id = rec['business_id']
+                    if business_id in business_id_to_idx:
+                        business_idx = business_id_to_idx[business_id]
+                        # Normalize score to be between 1-5
+                        score = min(5, max(1, rec['avg_rating']))
+                        graph_recs[user_idx].append((business_idx, score))
+        
+        # Check if we have valid recommendations to evaluate
+        for method_name, recs in [("User-based CF", user_cf_recs), 
+                                ("Item-based CF", item_cf_recs), 
+                                ("Graph-based", graph_recs)]:
+            total_recs = sum(len(user_recs) for user_recs in recs.values())
+            print(f"{method_name}: {len(recs)} users with recommendations, {total_recs} total recommendations")
         
         hybrid_recs = self.hybrid_recommendation(train_df, test_users, business_features_df)
         
@@ -931,16 +1014,22 @@ def main():
         ratings_df = recommender.fetch_user_business_ratings()
         business_features_df = recommender.fetch_business_features()
         
-        # Preprocess data
+        # Print some stats about the data
+        print(f"Total ratings: {len(ratings_df)}")
+        print(f"Unique users: {ratings_df['user_id'].nunique()}")
+        print(f"Unique businesses: {ratings_df['business_id'].nunique()}")
+        print(f"Rating distribution: {ratings_df['rating'].value_counts().sort_index()}")
+        
+        # Preprocess data (with improved preprocessing)
         train_df, test_df, user_to_idx, business_to_idx = recommender.preprocess_data(ratings_df)
         
         # Save the mappings
         recommender.save_mappings(user_to_idx, business_to_idx)
         
-        # Compare recommendation methods
+        # Compare recommendation methods (with a smaller user sample to ensure good coverage)
         print("Comparing recommendation methods...")
         metrics = recommender.compare_recommendation_methods(
-            train_df, test_df, business_features_df, user_sample=100
+            train_df, test_df, business_features_df, user_sample=50
         )
         
         # Visualize results
