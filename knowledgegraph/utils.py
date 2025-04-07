@@ -1,1260 +1,733 @@
-import os
-import pickle
-import joblib
-import numpy as np
 import pandas as pd
+import numpy as np
+import pickle
+import os
+import json
 from neo4j import GraphDatabase
-from sklearn.metrics import mean_squared_error, precision_score, recall_score, ndcg_score
+from sklearn.metrics import mean_squared_error, precision_score, recall_score, f1_score
 from sklearn.model_selection import train_test_split
-import time
-import matplotlib.pyplot as plt
 from collections import defaultdict
 
-class YelpRecommender:
-    def __init__(self, uri, user, password, models_folder='models'):
+class YelpRecommendationSystem:
+    def __init__(self, uri, user, password):
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
-        self.models_folder = models_folder
-        
-        # Create models folder if it doesn't exist
-        if not os.path.exists(models_folder):
-            os.makedirs(models_folder)
-            print(f"Created models folder: {models_folder}")
+        # Store model parameters
+        self.parameters = {
+            'similarity_threshold': 0.3,
+            'cf_weight': 0.6,
+            'cb_weight': 0.4
+        }
+        # Cache for storing user preferences and similarity data
+        self.user_preferences = {}
+        self.user_similarities = {}
         
     def close(self):
         self.driver.close()
-    
+        
     def fetch_user_business_ratings(self):
         """
         Fetch all user-business ratings from the database
-        Returns a pandas DataFrame with user_id, business_id, and stars
+        Returns DataFrame with user_id, business_id, stars columns
         """
         with self.driver.session() as session:
             result = session.run("""
-            MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
-            RETURN u.user_id AS user_id, b.business_id AS business_id, 
-                   r.stars AS rating, r.date AS date
-            ORDER BY r.date
+                MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
+                RETURN u.user_id AS user_id, b.business_id AS business_id, r.stars AS stars
             """)
             
-            # Convert to pandas DataFrame
-            ratings_df = pd.DataFrame([dict(record) for record in result])
-            print(f"Fetched {len(ratings_df)} ratings")
-            return ratings_df
-            
-    def fetch_business_features(self):
-        """
-        Fetch business features for content-based filtering
-        """
-        with self.driver.session() as session:
-            # Get businesses with their categories
-            result = session.run("""
-            MATCH (b:Business)-[:IN_CATEGORY]->(c:Category)
-            RETURN b.business_id AS business_id, 
-                   collect(c.name) AS categories,
-                   b.city AS city,
-                   b.stars AS avg_stars,
-                   b.review_count AS review_count
-            """)
-            
-            businesses = []
+            ratings = []
             for record in result:
-                business = dict(record)
-                businesses.append(business)
+                ratings.append({
+                    'user_id': record['user_id'],
+                    'business_id': record['business_id'],
+                    'stars': record['stars']
+                })
+            
+            return pd.DataFrame(ratings)
+    
+    def build_user_preference_model(self, save_path='models'):
+        """
+        Build and save user preference models for faster recommendations
+        """
+        # Ensure the directory exists
+        os.makedirs(save_path, exist_ok=True)
+        
+        with self.driver.session() as session:
+            # Build user-category preferences
+            print("Building user-category preferences...")
+            user_category_result = session.run("""
+                MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)-[:IN_CATEGORY]->(c:Category)
+                RETURN u.user_id AS user_id, c.name AS category, 
+                       count(b) AS frequency, avg(r.stars) AS avg_rating
+            """)
+            
+            user_category_prefs = defaultdict(dict)
+            for record in user_category_result:
+                user_id = record['user_id']
+                category = record['category']
+                weight = record['frequency'] * record['avg_rating']
+                user_category_prefs[user_id][category] = weight
+            
+            # Save the user preferences
+            self.user_preferences = dict(user_category_prefs)
+            with open(os.path.join(save_path, 'user_category_preferences.pkl'), 'wb') as f:
+                pickle.dump(self.user_preferences, f)
                 
-            business_df = pd.DataFrame(businesses)
-            print(f"Fetched features for {len(business_df)} businesses")
-            return business_df
+            # Build user-user similarities
+            print("Building user similarity model...")
+            user_similarity_result = session.run("""
+                MATCH (u1:User)-[:WROTE]->(r1:Review)-[:ABOUT]->(b:Business)<-[:ABOUT]-(r2:Review)<-[:WROTE]-(u2:User)
+                WHERE u1 <> u2
+                WITH u1.user_id AS user1, u2.user_id AS user2, 
+                     count(b) AS common_businesses,
+                     sum(abs(r1.stars - r2.stars)) AS total_diff
+                WHERE common_businesses >= 5
+                RETURN user1, user2, common_businesses, 
+                       total_diff / common_businesses AS avg_diff
+                ORDER BY common_businesses DESC, avg_diff ASC
+            """)
             
-    def preprocess_data(self, ratings_df, test_size=0.2, random_state=42):
+            user_similarities = defaultdict(dict)
+            for record in user_similarity_result:
+                user1 = record['user1']
+                user2 = record['user2']
+                common = record['common_businesses']
+                avg_diff = record['avg_diff']
+                
+                # Calculate similarity score (higher is better)
+                similarity = (1 / (1 + avg_diff)) * np.log1p(common)
+                
+                # Only store if similarity is above threshold
+                if similarity > 0.2:  # Threshold to keep model size manageable
+                    user_similarities[user1][user2] = similarity
+            
+            # Save the user similarities
+            self.user_similarities = dict(user_similarities)
+            with open(os.path.join(save_path, 'user_similarities.pkl'), 'wb') as f:
+                pickle.dump(self.user_similarities, f)
+                
+            # Save model parameters
+            with open(os.path.join(save_path, 'model_parameters.json'), 'w') as f:
+                json.dump(self.parameters, f)
+                
+            print(f"Models saved to {save_path}")
+            
+    def load_models(self, load_path='models'):
         """
-        Split data into training and testing sets with improved train/test split
+        Load saved models
         """
-        # Sort by date to ensure train data comes before test data
-        ratings_df = ratings_df.sort_values('date')
-        
-        # Create user and business indices
-        unique_users = ratings_df['user_id'].unique()
-        unique_businesses = ratings_df['business_id'].unique()
-        
-        user_to_idx = {user: i for i, user in enumerate(unique_users)}
-        business_to_idx = {business: i for i, business in enumerate(unique_businesses)}
-        
-        # Convert user_id and business_id to indices
-        ratings_df['user_idx'] = ratings_df['user_id'].map(user_to_idx)
-        ratings_df['business_idx'] = ratings_df['business_id'].map(business_to_idx)
-        
-        # Filter out users with too few ratings for proper train/test split
-        # Count ratings per user
-        user_rating_counts = ratings_df['user_idx'].value_counts()
-        
-        # Only keep users with at least 5 ratings to ensure they have data in both train and test
-        min_ratings = 5
-        users_with_enough_ratings = user_rating_counts[user_rating_counts >= min_ratings].index
-        print(f"Filtering from {len(user_rating_counts)} users to {len(users_with_enough_ratings)} users with at least {min_ratings} ratings")
-        
-        filtered_df = ratings_df[ratings_df['user_idx'].isin(users_with_enough_ratings)]
-        
-        # Split data ensuring each user has both train and test data
-        train_df = pd.DataFrame()
-        test_df = pd.DataFrame()
-        
-        # Group by user
-        grouped = filtered_df.groupby('user_idx')
-        
-        for user_idx, user_ratings in grouped:
-            # Sort by date to ensure chronological order
-            user_ratings = user_ratings.sort_values('date')
+        try:
+            # Load user category preferences
+            with open(os.path.join(load_path, 'user_category_preferences.pkl'), 'rb') as f:
+                self.user_preferences = pickle.load(f)
+                
+            # Load user similarities
+            with open(os.path.join(load_path, 'user_similarities.pkl'), 'rb') as f:
+                self.user_similarities = pickle.load(f)
+                
+            # Load parameters
+            with open(os.path.join(load_path, 'model_parameters.json'), 'r') as f:
+                self.parameters = json.load(f)
+                
+            print(f"Models loaded from {load_path}")
+            return True
             
-            # Split this user's ratings into train/test
-            # Keep at least 3 ratings in training
-            train_size = max(3, int(len(user_ratings) * (1 - test_size)))
-            
-            user_train = user_ratings.iloc[:train_size]
-            user_test = user_ratings.iloc[train_size:]
-            
-            # Ensure test set has at least one item
-            if len(user_test) == 0:
-                # If not enough ratings, put one in test
-                user_test = user_ratings.iloc[-1:]
-                user_train = user_ratings.iloc[:-1]
-            
-            train_df = pd.concat([train_df, user_train])
-            test_df = pd.concat([test_df, user_test])
-        
-        print(f"Training set: {len(train_df)}, Testing set: {len(test_df)}")
-        print(f"Number of users in train: {train_df['user_idx'].nunique()}, in test: {test_df['user_idx'].nunique()}")
-        
-        # Verify that each user in test set has data in train set
-        test_users = set(test_df['user_idx'].unique())
-        train_users = set(train_df['user_idx'].unique())
-        users_missing_from_train = test_users - train_users
-        
-        if users_missing_from_train:
-            print(f"WARNING: {len(users_missing_from_train)} users in test set have no data in train set!")
-        
-        return train_df, test_df, user_to_idx, business_to_idx
+        except Exception as e:
+            print(f"Error loading models: {e}")
+            return False
     
-    def save_user_cf_model(self, user_item_matrix, user_similarity):
-        """Save User-based CF model components"""
-        print("Saving User-based CF model...")
-        model_path = os.path.join(self.models_folder, 'user_cf_model')
-        if not os.path.exists(model_path):
-            os.makedirs(model_path)
-            
-        # Save user-item matrix
-        user_item_matrix.to_pickle(os.path.join(model_path, 'user_item_matrix.pkl'))
-        
-        # Save user similarity matrix
-        joblib.dump(user_similarity, os.path.join(model_path, 'user_similarity.pkl'))
-        
-        print(f"User-based CF model saved to {model_path}")
-    
-    def save_item_cf_model(self, user_item_matrix, item_similarity):
-        """Save Item-based CF model components"""
-        print("Saving Item-based CF model...")
-        model_path = os.path.join(self.models_folder, 'item_cf_model')
-        if not os.path.exists(model_path):
-            os.makedirs(model_path)
-            
-        # Save user-item matrix
-        user_item_matrix.to_pickle(os.path.join(model_path, 'user_item_matrix.pkl'))
-        
-        # Save item similarity matrix
-        joblib.dump(item_similarity, os.path.join(model_path, 'item_similarity.pkl'))
-        
-        print(f"Item-based CF model saved to {model_path}")
-    
-    def save_mappings(self, user_to_idx, business_to_idx):
-        """Save ID to index mappings"""
-        print("Saving ID to index mappings...")
-        mappings_path = os.path.join(self.models_folder, 'mappings')
-        if not os.path.exists(mappings_path):
-            os.makedirs(mappings_path)
-            
-        # Save user mapping
-        with open(os.path.join(mappings_path, 'user_to_idx.pkl'), 'wb') as f:
-            pickle.dump(user_to_idx, f)
-            
-        # Save business mapping
-        with open(os.path.join(mappings_path, 'business_to_idx.pkl'), 'wb') as f:
-            pickle.dump(business_to_idx, f)
-            
-        # Also create reverse mappings for convenience
-        idx_to_user = {idx: user for user, idx in user_to_idx.items()}
-        idx_to_business = {idx: business for business, idx in business_to_idx.items()}
-        
-        with open(os.path.join(mappings_path, 'idx_to_user.pkl'), 'wb') as f:
-            pickle.dump(idx_to_user, f)
-            
-        with open(os.path.join(mappings_path, 'idx_to_business.pkl'), 'wb') as f:
-            pickle.dump(idx_to_business, f)
-            
-        print(f"Mappings saved to {mappings_path}")
-    
-    def save_hybrid_model_weights(self, alpha=0.7, beta=0.2, gamma=0.1):
-        """Save hybrid model weights"""
-        print("Saving hybrid model weights...")
-        model_path = os.path.join(self.models_folder, 'hybrid_model')
-        if not os.path.exists(model_path):
-            os.makedirs(model_path)
-            
-        weights = {
-            'alpha': alpha,  # Weight for user-based CF
-            'beta': beta,    # Weight for item-based CF
-            'gamma': gamma   # Weight for content-based/graph-based
-        }
-        
-        with open(os.path.join(model_path, 'weights.pkl'), 'wb') as f:
-            pickle.dump(weights, f)
-            
-        print(f"Hybrid model weights saved to {model_path}")
-    
-    def save_graph_model_queries(self):
-        """Save graph model queries for reproducibility"""
-        print("Saving graph model queries...")
-        model_path = os.path.join(self.models_folder, 'graph_model')
-        if not os.path.exists(model_path):
-            os.makedirs(model_path)
-            
-        # Define the queries used for graph-based recommendations
-        queries = {
-            'category_based': """
-            MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)-[:IN_CATEGORY]->(c:Category)
-            WHERE r.stars >= 4
-            WITH u, c, count(*) as category_weight
-            
-            MATCH (c)<-[:IN_CATEGORY]-(rec_business:Business)
-            WHERE NOT EXISTS((u)-[:WROTE]->(:Review)-[:ABOUT]->(rec_business))
-            
-            WITH rec_business, sum(category_weight) as score, collect(distinct c.name) as matched_categories
-            ORDER BY score DESC, rec_business.stars DESC
-            LIMIT $max_items
-            
-            RETURN rec_business.business_id as business_id, 
-                rec_business.name as name,
-                rec_business.stars as avg_rating,
-                score,
-                matched_categories
-            """,
-            
-            'collaborative': """
-            MATCH (u1:User {user_id: $user_id})-[:WROTE]->(r1:Review)-[:ABOUT]->(b:Business)
-            <-[:ABOUT]-(r2:Review)<-[:WROTE]-(u2:User)
-            WHERE r1.stars >= 4 AND r2.stars >= 4 AND u1 <> u2
-            
-            WITH u1, u2, count(distinct b) as common_likes
-            ORDER BY common_likes DESC
-            LIMIT 10
-            
-            MATCH (u2)-[:WROTE]->(r:Review)-[:ABOUT]->(rec_business:Business)
-            WHERE r.stars >= 4
-            AND NOT EXISTS((u1)-[:WROTE]->(:Review)-[:ABOUT]->(rec_business))
-            
-            WITH rec_business, sum(common_likes) as score
-            ORDER BY score DESC, rec_business.stars DESC
-            LIMIT $remaining
-            
-            RETURN rec_business.business_id as business_id,
-                rec_business.name as name,
-                rec_business.stars as avg_rating,
-                score,
-                [] as matched_categories
-            """
-        }
-        
-        with open(os.path.join(model_path, 'queries.pkl'), 'wb') as f:
-            pickle.dump(queries, f)
-            
-        print(f"Graph model queries saved to {model_path}")
-    
-    def save_evaluation_metrics(self, metrics, metrics_table):
-        """Save evaluation metrics"""
-        print("Saving evaluation metrics...")
-        eval_path = os.path.join(self.models_folder, 'evaluation')
-        if not os.path.exists(eval_path):
-            os.makedirs(eval_path)
-            
-        # Save metrics as pickle
-        with open(os.path.join(eval_path, 'metrics.pkl'), 'wb') as f:
-            pickle.dump(metrics, f)
-            
-        # Save metrics table as CSV
-        metrics_table.to_csv(os.path.join(eval_path, 'metrics_table.csv'))
-        
-        print(f"Evaluation metrics saved to {eval_path}")
-    
-    def load_user_cf_model(self):
-        """Load User-based CF model components"""
-        model_path = os.path.join(self.models_folder, 'user_cf_model')
-        if not os.path.exists(model_path):
-            print("User-based CF model not found")
-            return None, None
-        
-        user_item_matrix = pd.read_pickle(os.path.join(model_path, 'user_item_matrix.pkl'))
-        user_similarity = joblib.load(os.path.join(model_path, 'user_similarity.pkl'))
-        
-        print(f"User-based CF model loaded from {model_path}")
-        return user_item_matrix, user_similarity
-    
-    def load_item_cf_model(self):
-        """Load Item-based CF model components"""
-        model_path = os.path.join(self.models_folder, 'item_cf_model')
-        if not os.path.exists(model_path):
-            print("Item-based CF model not found")
-            return None, None
-        
-        user_item_matrix = pd.read_pickle(os.path.join(model_path, 'user_item_matrix.pkl'))
-        item_similarity = joblib.load(os.path.join(model_path, 'item_similarity.pkl'))
-        
-        print(f"Item-based CF model loaded from {model_path}")
-        return user_item_matrix, item_similarity
-    
-    def load_mappings(self):
-        """Load ID to index mappings"""
-        mappings_path = os.path.join(self.models_folder, 'mappings')
-        if not os.path.exists(mappings_path):
-            print("Mappings not found")
-            return None, None, None, None
-        
-        with open(os.path.join(mappings_path, 'user_to_idx.pkl'), 'rb') as f:
-            user_to_idx = pickle.load(f)
-            
-        with open(os.path.join(mappings_path, 'business_to_idx.pkl'), 'rb') as f:
-            business_to_idx = pickle.load(f)
-            
-        with open(os.path.join(mappings_path, 'idx_to_user.pkl'), 'rb') as f:
-            idx_to_user = pickle.load(f)
-            
-        with open(os.path.join(mappings_path, 'idx_to_business.pkl'), 'rb') as f:
-            idx_to_business = pickle.load(f)
-            
-        print(f"Mappings loaded from {mappings_path}")
-        return user_to_idx, business_to_idx, idx_to_user, idx_to_business
-
-# Let's update the user_based_cf method to save the model
-    def user_based_cf(self, train_df, test_users, k=10, save_model=True):
+    def collaborative_filtering(self, target_user_id, n=10, similarity_threshold=None):
         """
         User-based collaborative filtering
-        Recommends based on similar users' preferences
-        
-        Parameters:
-        - train_df: Training data containing user_idx, business_idx, rating
-        - test_users: User indices to make predictions for
-        - k: Number of similar users to consider
-        - save_model: Whether to save the model components
-        
-        Returns:
-        - Dictionary of recommendations for each user
+        Returns top n recommended businesses for the target user
         """
-        print("Running user-based collaborative filtering...")
-        start_time = time.time()
-        
-        # Create user-item rating matrix
-        user_item_matrix = pd.pivot_table(
-            train_df, 
-            values='rating', 
-            index='user_idx', 
-            columns='business_idx',
-            fill_value=0
-        )
-        
-        # Calculate user similarity (cosine similarity)
-        from sklearn.metrics.pairwise import cosine_similarity
-        user_similarity = cosine_similarity(user_item_matrix)
-        
-        # Save model if requested
-        if save_model:
-            self.save_user_cf_model(user_item_matrix, user_similarity)
-        
-        # For each test user, find similar users and recommend items
-        recommendations = {}
-        
-        for user_idx in test_users:
-            if user_idx >= len(user_similarity):
-                continue  # Skip users not in training set
-                
-            # Get similarity scores for this user
-            sim_scores = user_similarity[user_idx]
-            
-            # Get top-k similar users (excluding self)
-            similar_users = np.argsort(sim_scores)[::-1][1:k+1]
-            
-            # Get items rated by similar users but not by the target user
-            user_rated_items = set(train_df[train_df['user_idx'] == user_idx]['business_idx'])
-            candidate_items = {}
-            
-            for sim_user in similar_users:
-                # Weight of this similar user (similarity score)
-                weight = sim_scores[sim_user]
-                
-                # Items rated by this similar user
-                sim_user_ratings = train_df[train_df['user_idx'] == sim_user]
-                
-                for _, row in sim_user_ratings.iterrows():
-                    item = row['business_idx']
-                    rating = row['rating']
-                    
-                    # Skip items already rated by target user
-                    if item in user_rated_items:
-                        continue
-                        
-                    # Weighted rating
-                    if item not in candidate_items:
-                        candidate_items[item] = {'weighted_sum': 0, 'similarity_sum': 0}
-                        
-                    candidate_items[item]['weighted_sum'] += weight * rating
-                    candidate_items[item]['similarity_sum'] += weight
-            
-            # Calculate predicted ratings
-            user_recommendations = {}
-            for item, values in candidate_items.items():
-                if values['similarity_sum'] > 0:
-                    predicted_rating = values['weighted_sum'] / values['similarity_sum']
-                    user_recommendations[item] = predicted_rating
-            
-            # Sort recommendations by predicted rating
-            sorted_recommendations = sorted(
-                user_recommendations.items(), 
-                key=lambda x: x[1], 
-                reverse=True
-            )
-            
-            recommendations[user_idx] = sorted_recommendations
-        
-        end_time = time.time()
-        print(f"User-based CF completed in {end_time - start_time:.2f} seconds")
-        return recommendations
-        
-
-    # Let's update the item_based_cf method to save the model
-    def item_based_cf(self, train_df, test_users, k=10, save_model=True):
-        """
-        Item-based collaborative filtering
-        Recommends items similar to ones the user liked
-        
-        Parameters:
-        - train_df: Training data containing user_idx, business_idx, rating
-        - test_users: User indices to make predictions for
-        - k: Number of similar items to consider
-        - save_model: Whether to save the model components
-        
-        Returns:
-        - Dictionary of recommendations for each user
-        """
-        print("Running item-based collaborative filtering...")
-        start_time = time.time()
-        
-        # Create user-item rating matrix
-        user_item_matrix = pd.pivot_table(
-            train_df, 
-            values='rating', 
-            index='user_idx', 
-            columns='business_idx',
-            fill_value=0
-        )
-        
-        # Calculate item similarity (cosine similarity)
-        from sklearn.metrics.pairwise import cosine_similarity
-        item_similarity = cosine_similarity(user_item_matrix.T)  # Transpose for item-item similarity
-        
-        # Save model if requested
-        if save_model:
-            self.save_item_cf_model(user_item_matrix, item_similarity)
-        
-        # For each test user, recommend items
-        recommendations = {}
-
-        for user_idx in test_users:
-            # Get items rated by this user
-            user_rated_items = train_df[train_df['user_idx'] == user_idx]
-            
-            if len(user_rated_items) == 0:
-                continue  # Skip users with no ratings
-            
-            # Calculate predicted ratings for unrated items
-            candidate_items = {}
-            
-            for _, row in user_rated_items.iterrows():
-                item = row['business_idx']
-                rating = row['rating']
-                
-                # Get similar items
-                if item >= len(item_similarity):
-                    continue  # Skip items not in training set
-                    
-                sim_scores = item_similarity[item]
-                
-                # Get items not rated by the user
-                all_items = set(range(item_similarity.shape[0]))
-                user_rated_set = set(user_rated_items['business_idx'])
-                unrated_items = all_items - user_rated_set
-                
-                for unrated_item in unrated_items:
-                    if unrated_item >= len(sim_scores):
-                        continue
-                        
-                    similarity = sim_scores[unrated_item]
-                    
-                    if unrated_item not in candidate_items:
-                        candidate_items[unrated_item] = {'weighted_sum': 0, 'similarity_sum': 0}
-                        
-                    candidate_items[unrated_item]['weighted_sum'] += similarity * rating
-                    candidate_items[unrated_item]['similarity_sum'] += similarity
-            
-            # Calculate predicted ratings
-            user_recommendations = {}
-            for item, values in candidate_items.items():
-                if values['similarity_sum'] > 0:
-                    predicted_rating = values['weighted_sum'] / values['similarity_sum']
-                    user_recommendations[item] = predicted_rating
-            
-            # Sort recommendations by predicted rating
-            sorted_recommendations = sorted(
-                user_recommendations.items(), 
-                key=lambda x: x[1], 
-                reverse=True
-            )
-            
-            recommendations[user_idx] = sorted_recommendations
-        
-        end_time = time.time()
-        print(f"Item-based CF completed in {end_time - start_time:.2f} seconds")
-        return recommendations
-        
-
-    def graph_based_recommendation(self, test_users, max_items=10, save_model=True):
-        """
-        Graph-based recommendation using Neo4j's graph algorithms
-        
-        Parameters:
-        - test_users: List of user IDs to generate recommendations for
-        - max_items: Maximum number of items to recommend per user
-        - save_model: Whether to save the model queries
-        
-        Returns:
-        - Dictionary of recommendations for each user
-        """
-        print("Running graph-based recommendation...")
-        start_time = time.time()
-        
-        # Save model if requested
-        if save_model:
-            self.save_graph_model_queries()
-        
-        recommendations = {}
+        if similarity_threshold is None:
+            similarity_threshold = self.parameters['similarity_threshold']
             
         with self.driver.session() as session:
-            for user_id in test_users:
-                # Get recommendations based on common categories with highly-rated businesses
-                result = session.run("""
-                MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)-[:IN_CATEGORY]->(c:Category)
-                WHERE r.stars >= 4
-                WITH u, c, count(*) as category_weight
+            # First, get all the businesses the target user has already rated
+            rated_businesses = session.run("""
+                MATCH (u:User {user_id: $user_id})-[:WROTE]->()-[:ABOUT]->(b:Business)
+                RETURN b.business_id AS business_id
+            """, user_id=target_user_id).values()
+            
+            rated_businesses = [item[0] for item in rated_businesses]
+            
+            # Use pre-computed similarities if available
+            similar_users = []
+            if target_user_id in self.user_similarities:
+                for other_user, similarity in sorted(self.user_similarities[target_user_id].items(), 
+                                                   key=lambda x: x[1], reverse=True)[:50]:
+                    similar_users.append({
+                        'other_user_id': other_user,
+                        'similarity': similarity
+                    })
+            
+            # If no pre-computed similarities, fetch from database
+            if not similar_users:
+                similar_users_result = session.run("""
+                    MATCH (target:User {user_id: $user_id})-[:WROTE]->(r1:Review)-[:ABOUT]->(b:Business)
+                    MATCH (other:User)-[:WROTE]->(r2:Review)-[:ABOUT]->(b)
+                    WHERE target <> other
+                    WITH other.user_id AS other_user_id, 
+                         count(b) AS common_businesses,
+                         abs(avg(r1.stars - r2.stars)) AS rating_diff
+                    WHERE common_businesses > 5
+                    RETURN other_user_id, common_businesses, rating_diff
+                    ORDER BY rating_diff ASC, common_businesses DESC
+                    LIMIT 50
+                """, user_id=target_user_id)
                 
-                MATCH (c)<-[:IN_CATEGORY]-(rec_business:Business)
-                WHERE NOT EXISTS((u)-[:WROTE]->(:Review)-[:ABOUT]->(rec_business))
-                
-                WITH rec_business, sum(category_weight) as score, collect(distinct c.name) as matched_categories
-                ORDER BY score DESC, rec_business.stars DESC
-                LIMIT $max_items
-                
-                RETURN rec_business.business_id as business_id, 
-                        rec_business.name as name,
-                        rec_business.stars as avg_rating,
-                        score,
-                        matched_categories
-                """, user_id=user_id, max_items=max_items)
-                
-                user_recs = [dict(record) for record in result]
-                
-                # If not enough category-based recommendations, supplement with collaborative approach
-                if len(user_recs) < max_items:
-                    # FIX: Store the user in a variable first and then reuse it in the NOT EXISTS clause
-                    collab_result = session.run("""
-                    MATCH (u1:User {user_id: $user_id})-[:WROTE]->(r1:Review)-[:ABOUT]->(b:Business)
-                    <-[:ABOUT]-(r2:Review)<-[:WROTE]-(u2:User)
-                    WHERE r1.stars >= 4 AND r2.stars >= 4 AND u1 <> u2
+                for record in similar_users_result:
+                    similar_user_id = record['other_user_id']
+                    common_businesses = record['common_businesses']
+                    rating_diff = record['rating_diff']
                     
-                    WITH u1, u2, count(distinct b) as common_likes
-                    ORDER BY common_likes DESC
-                    LIMIT 10
+                    # Skip users with too different ratings
+                    if rating_diff > similarity_threshold:
+                        continue
                     
-                    MATCH (u2)-[:WROTE]->(r:Review)-[:ABOUT]->(rec_business:Business)
+                    # Calculate similarity score (higher is better)
+                    similarity = (1 / (1 + rating_diff)) * common_businesses
+                    
+                    similar_users.append({
+                        'other_user_id': similar_user_id,
+                        'similarity': similarity
+                    })
+            
+            # Get recommendations from similar users
+            recommendations = []
+            
+            for user_data in similar_users:
+                similar_user_id = user_data['other_user_id']
+                similarity = user_data['similarity']
+                
+                # Get highly-rated businesses from this similar user that target user hasn't rated
+                similar_user_businesses = session.run("""
+                    MATCH (u:User {user_id: $similar_user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
+                    WHERE r.stars >= 4 AND NOT b.business_id IN $rated_businesses
+                    RETURN b.business_id AS business_id, b.name AS name, b.stars AS avg_stars, 
+                           r.stars AS user_stars, b.review_count AS review_count
+                """, similar_user_id=similar_user_id, rated_businesses=rated_businesses)
+                
+                for business in similar_user_businesses:
+                    # Calculate recommendation score
+                    rec_score = similarity * business['user_stars']
+                    
+                    recommendations.append({
+                        'business_id': business['business_id'],
+                        'name': business['name'],
+                        'avg_stars': business['avg_stars'],
+                        'rec_score': rec_score,
+                        'review_count': business['review_count']
+                    })
+            
+            # Sort and remove duplicates
+            recommendations_df = pd.DataFrame(recommendations)
+            if recommendations_df.empty:
+                return recommendations_df
+                
+            recommendations_df = recommendations_df.sort_values('rec_score', ascending=False)
+            recommendations_df = recommendations_df.drop_duplicates(subset=['business_id'])
+            
+            return recommendations_df.head(n)
+    
+    def content_based_recommendation(self, target_user_id, n=10):
+        """
+        Content-based filtering based on categories the user has rated highly
+        """
+        with self.driver.session() as session:
+            # Get all businesses already rated by the user
+            rated_businesses = session.run("""
+                MATCH (u:User {user_id: $user_id})-[:WROTE]->()-[:ABOUT]->(b:Business)
+                RETURN b.business_id AS business_id
+            """, user_id=target_user_id).values()
+            
+            rated_businesses = [item[0] for item in rated_businesses]
+            
+            # Use pre-computed category preferences if available
+            category_weights = {}
+            if target_user_id in self.user_preferences:
+                category_weights = self.user_preferences[target_user_id]
+            
+            # If no pre-computed preferences, fetch from database
+            if not category_weights:
+                # Find categories the user likes based on high ratings
+                liked_categories = session.run("""
+                    MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)-[:IN_CATEGORY]->(c:Category)
                     WHERE r.stars >= 4
-                    AND NOT EXISTS((u1)-[:WROTE]->(:Review)-[:ABOUT]->(rec_business))
-                    
-                    WITH rec_business, sum(common_likes) as score
-                    ORDER BY score DESC, rec_business.stars DESC
-                    LIMIT $remaining
-                    
-                    RETURN rec_business.business_id as business_id,
-                            rec_business.name as name,
-                            rec_business.stars as avg_rating,
-                            score,
-                            [] as matched_categories
-                    """, user_id=user_id, remaining=max_items-len(user_recs))
-                    
-                    collab_recs = [dict(record) for record in collab_result]
-                    user_recs.extend(collab_recs)
+                    RETURN c.name AS category, count(b) AS frequency, avg(r.stars) AS avg_rating
+                    ORDER BY frequency DESC, avg_rating DESC
+                    LIMIT 10
+                """, user_id=target_user_id)
                 
-                recommendations[user_id] = user_recs
-        
-        end_time = time.time()
-        print(f"Graph-based recommendation completed in {end_time - start_time:.2f} seconds")
-        return recommendations
-        
-    # Let's update the hybrid_recommendation method to save the weights
-    def hybrid_recommendation(self, train_df, test_users, business_features_df, weights=None):
-        """
-        Hybrid recommendation method combining CF and content-based approaches
-        
-        Parameters:
-        - train_df: Training data
-        - test_users: List of user indices to generate recommendations for
-        - business_features_df: Business features for content-based filtering
-        - weights: Dictionary of weights for each method (default: equal weights)
-        
-        Returns:
-        - Dictionary of user_idx -> [(item_idx, score), ...]
-        """
-        print("Running user-based collaborative filtering...")
-        start_time = time.time()
-        user_cf_recs = self.user_based_cf(train_df, test_users)
-        print(f"User-based CF completed in {time.time() - start_time:.2f} seconds")
-        
-        print("Running item-based collaborative filtering...")
-        start_time = time.time()
-        item_cf_recs = self.item_based_cf(train_df, test_users)
-        print(f"Item-based CF completed in {time.time() - start_time:.2f} seconds")
-        
-        print("Running graph-based recommendation...")
-        start_time = time.time()
-        
-        # For graph-based, need to map indices back to IDs
-        user_idx_to_id = {}
-        for _, row in train_df.iterrows():
-            user_idx_to_id[row['user_idx']] = row['user_id']
-        
-        # Map test users to their IDs
-        test_user_ids = [user_idx_to_id.get(idx) for idx in test_users if idx in user_idx_to_id]
-        test_user_ids = [user_id for user_id in test_user_ids if user_id is not None]
-        
-        # If there are no valid user IDs, set empty graph recommendations
-        if not test_user_ids:
-            print("WARNING: No valid user IDs found for graph-based recommendations")
-            graph_recs = {}
-        else:
-            graph_recs_by_id = self.graph_based_recommendation(test_user_ids)
+                # Store categories and their weights
+                for record in liked_categories:
+                    category_weights[record['category']] = record['frequency'] * record['avg_rating']
             
-            # Convert graph recommendations back to indices format
-            id_to_idx = {v: k for k, v in user_idx_to_id.items() if v is not None}
+            if not category_weights:
+                return pd.DataFrame()  # Return empty DataFrame if no preferences found
             
-            # Create a mapping from business_id to business_idx
-            business_id_to_idx = {}
-            for _, row in train_df.iterrows():
-                business_id_to_idx[row['business_id']] = row['business_idx']
+            # Find businesses in those categories that the user hasn't rated
+            recommendations = []
             
-            graph_recs = {}
-            for user_id, recs in graph_recs_by_id.items():
-                if user_id not in id_to_idx:
-                    continue
-                    
-                user_idx = id_to_idx[user_id]
-                graph_recs[user_idx] = []
+            for category, weight in category_weights.items():
+                category_businesses = session.run("""
+                    MATCH (c:Category {name: $category})<-[:IN_CATEGORY]-(b:Business)
+                    WHERE NOT b.business_id IN $rated_businesses
+                    AND b.stars >= 3.5 AND b.review_count >= 10
+                    RETURN b.business_id AS business_id, b.name AS name, 
+                           b.stars AS avg_stars, b.review_count AS review_count
+                    LIMIT 25
+                """, category=category, rated_businesses=rated_businesses)
                 
-                for rec in recs:
-                    business_id = rec['business_id']
-                    if business_id in business_id_to_idx:
-                        business_idx = business_id_to_idx[business_id]
-                        # Normalize score to be between 1-5
-                        score = min(5, max(1, rec['avg_rating']))
-                        graph_recs[user_idx].append((business_idx, score))
+                for business in category_businesses:
+                    # Calculate recommendation score
+                    rec_score = weight * business['avg_stars']
+                    
+                    recommendations.append({
+                        'business_id': business['business_id'],
+                        'name': business['name'],
+                        'avg_stars': business['avg_stars'],
+                        'category': category,
+                        'rec_score': rec_score,
+                        'review_count': business['review_count']
+                    })
+            
+            # Sort and remove duplicates
+            recommendations_df = pd.DataFrame(recommendations)
+            if recommendations_df.empty:
+                return recommendations_df
+                
+            recommendations_df = recommendations_df.sort_values('rec_score', ascending=False)
+            recommendations_df = recommendations_df.drop_duplicates(subset=['business_id'])
+            
+            return recommendations_df.head(n)
+    
+    def hybrid_recommendation(self, target_user_id, n=10):
+        """
+        Hybrid recommendation combining collaborative and content-based filtering
+        """
+        # Get recommendations from both methods
+        cf_recs = self.collaborative_filtering(target_user_id, n=n*2)
+        cb_recs = self.content_based_recommendation(target_user_id, n=n*2)
         
-        print(f"Graph-based recommendation completed in {time.time() - start_time:.2f} seconds")
+        # Weight the scores (can be adjusted)
+        cf_weight = self.parameters['cf_weight']
+        cb_weight = self.parameters['cb_weight']
         
-        # Default weights
-        if weights is None:
-            weights = {'user_cf': 0.3, 'item_cf': 0.3, 'graph': 0.4}
+        if not cf_recs.empty:
+            cf_recs['score'] = cf_recs['rec_score'] * cf_weight
         
-        # Save hybrid model weights
-        print("Saving hybrid model weights...")
-        self.save_hybrid_model_weights(weights)
+        if not cb_recs.empty:
+            cb_recs['score'] = cb_recs['rec_score'] * cb_weight
         
         # Combine recommendations
-        hybrid_recs = {}
+        combined_recs = pd.concat([cf_recs, cb_recs], ignore_index=True)
         
-        for user in test_users:
-            # Get recommendations from each method
-            user_cf = user_cf_recs.get(user, [])
-            item_cf = item_cf_recs.get(user, [])
-            graph = graph_recs.get(user, [])
+        if combined_recs.empty:
+            # Fallback to popular businesses if no recommendations
+            return self.popular_businesses_recommendation(n)
+        
+        # Aggregate scores for businesses that appear in both methods
+        combined_recs = combined_recs.groupby('business_id').agg({
+            'name': 'first',
+            'avg_stars': 'first',
+            'review_count': 'first',
+            'score': 'sum'
+        }).reset_index()
+        
+        # Sort by score and return top n
+        return combined_recs.sort_values('score', ascending=False).head(n)
+    
+    def popular_businesses_recommendation(self, n=10, min_stars=4.0):
+        """
+        Fallback recommendation method using popular highly-rated businesses
+        """
+        with self.driver.session() as session:
+            result = session.run("""
+                MATCH (b:Business)
+                WHERE b.stars >= $min_stars AND b.review_count >= 20
+                RETURN b.business_id AS business_id, b.name AS name,
+                       b.stars AS avg_stars, b.review_count AS review_count,
+                       b.stars * log(b.review_count) AS popularity_score
+                ORDER BY popularity_score DESC
+                LIMIT $limit
+            """, min_stars=min_stars, limit=n)
             
-            # Skip if we have no recommendations
-            if not user_cf and not item_cf and not graph:
+            recommendations = []
+            for record in result:
+                recommendations.append({
+                    'business_id': record['business_id'],
+                    'name': record['name'],
+                    'avg_stars': record['avg_stars'],
+                    'review_count': record['review_count'],
+                    'score': record['popularity_score']
+                })
+            
+            return pd.DataFrame(recommendations)
+    
+    def get_user_demographic_recommendations(self, target_user_id, n=10):
+        """
+        Generate recommendations based on user demographics (users with similar rating patterns)
+        """
+        with self.driver.session() as session:
+            # Get all businesses already rated by the user
+            rated_businesses = session.run("""
+                MATCH (u:User {user_id: $user_id})-[:WROTE]->()-[:ABOUT]->(b:Business)
+                RETURN b.business_id AS business_id
+            """, user_id=target_user_id).values()
+            
+            rated_businesses = [item[0] for item in rated_businesses]
+            
+            # Find users with similar overall rating patterns (average stars, review count)
+            similar_users = session.run("""
+                MATCH (target:User {user_id: $user_id})
+                MATCH (other:User)
+                WHERE target <> other
+                AND abs(other.average_stars - target.average_stars) < 0.5
+                AND abs(other.review_count - target.review_count) < target.review_count * 0.3
+                RETURN other.user_id AS user_id
+                LIMIT 50
+            """, user_id=target_user_id)
+            
+            similar_user_ids = [record['user_id'] for record in similar_users]
+            
+            if not similar_user_ids:
+                return self.popular_businesses_recommendation(n)
+            
+            # Find businesses highly rated by similar users that target user hasn't rated
+            result = session.run("""
+                MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
+                WHERE u.user_id IN $similar_users
+                AND NOT b.business_id IN $rated_businesses
+                AND r.stars >= 4
+                WITH b, avg(r.stars) AS avg_user_rating, count(u) AS user_count
+                WHERE user_count >= 2
+                RETURN b.business_id AS business_id, b.name AS name,
+                       b.stars AS avg_stars, b.review_count AS review_count,
+                       avg_user_rating, user_count,
+                       avg_user_rating * log10(user_count + 1) AS score
+                ORDER BY score DESC
+                LIMIT $limit
+            """, similar_users=similar_user_ids, rated_businesses=rated_businesses, limit=n)
+            
+            recommendations = []
+            for record in result:
+                recommendations.append({
+                    'business_id': record['business_id'],
+                    'name': record['name'],
+                    'avg_stars': record['avg_stars'],
+                    'avg_user_rating': record['avg_user_rating'],
+                    'user_count': record['user_count'],
+                    'review_count': record['review_count'],
+                    'score': record['score']
+                })
+            
+            return pd.DataFrame(recommendations)
+    
+    def recommend_for_user(self, user_id, method='hybrid', n=10):
+        """
+        Generate recommendations for a user using the specified method
+        """
+        methods = {
+            'collaborative': self.collaborative_filtering,
+            'content': self.content_based_recommendation,
+            'hybrid': self.hybrid_recommendation,
+            'popular': self.popular_businesses_recommendation,
+            'demographic': self.get_user_demographic_recommendations
+        }
+        
+        if method not in methods:
+            raise ValueError(f"Method must be one of {list(methods.keys())}")
+        
+        # Special case for popular method which doesn't require user_id
+        if method == 'popular':
+            return self.popular_businesses_recommendation(n)
+        
+        # Call the appropriate recommendation method
+        return methods[method](user_id, n)
+    
+    def update_parameters(self, parameters, save_path='models'):
+        """
+        Update the model parameters and save them
+        """
+        self.parameters.update(parameters)
+        
+        # Save updated parameters
+        os.makedirs(save_path, exist_ok=True)
+        with open(os.path.join(save_path, 'model_parameters.json'), 'w') as f:
+            json.dump(self.parameters, f)
+            
+        print(f"Parameters updated and saved to {save_path}")
+
+
+class RecommendationEvaluation:
+    def __init__(self, recommender):
+        self.recommender = recommender
+        
+    def create_train_test_split(self, test_ratio=0.2, min_ratings=10):
+        """
+        Split user ratings into training and testing datasets
+        """
+        # Fetch all ratings
+        ratings_df = self.recommender.fetch_user_business_ratings()
+        
+        # Get users with sufficient number of ratings
+        user_counts = ratings_df['user_id'].value_counts()
+        eligible_users = user_counts[user_counts >= min_ratings].index.tolist()
+        
+        # Filter ratings to only include eligible users
+        eligible_ratings = ratings_df[ratings_df['user_id'].isin(eligible_users)]
+        
+        # Create user-specific train/test splits
+        train_data = []
+        test_data = []
+        
+        for user_id in eligible_users:
+            user_ratings = eligible_ratings[eligible_ratings['user_id'] == user_id]
+            user_train, user_test = train_test_split(user_ratings, test_size=test_ratio, random_state=42)
+            
+            train_data.append(user_train)
+            test_data.append(user_test)
+        
+        # Combine all users' train/test data
+        train_df = pd.concat(train_data)
+        test_df = pd.concat(test_data)
+        
+        return train_df, test_df, eligible_users
+    
+    def evaluate_rmse(self, test_users, k=10):
+        """
+        Evaluate using Root Mean Squared Error
+        Lower RMSE is better
+        """
+        all_errors = []
+        
+        for user_id in test_users:
+            # Get recommendations for this user
+            recommendations = self.recommender.hybrid_recommendation(user_id, n=k)
+            
+            if recommendations.empty:
                 continue
-            
-            # Create a dictionary to combine scores
-            combined_scores = {}
-            
-            # Add weighted user-based CF scores
-            for item, score in user_cf:
-                if item not in combined_scores:
-                    combined_scores[item] = 0
-                combined_scores[item] += weights['user_cf'] * score
-            
-            # Add weighted item-based CF scores
-            for item, score in item_cf:
-                if item not in combined_scores:
-                    combined_scores[item] = 0
-                combined_scores[item] += weights['item_cf'] * score
-            
-            # Add weighted graph-based scores
-            for item, score in graph:
-                if item not in combined_scores:
-                    combined_scores[item] = 0
-                combined_scores[item] += weights['graph'] * score
-            
-            # Convert back to list of (item, score) tuples and sort by score
-            user_recs = [(item, score) for item, score in combined_scores.items()]
-            user_recs.sort(key=lambda x: x[1], reverse=True)
-            
-            hybrid_recs[user] = user_recs
+                
+            # Fetch actual ratings for recommended businesses
+            with self.recommender.driver.session() as session:
+                actual_ratings = session.run("""
+                    MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
+                    WHERE b.business_id IN $business_ids
+                    RETURN b.business_id AS business_id, r.stars AS actual_rating
+                """, user_id=user_id, business_ids=recommendations['business_id'].tolist())
+                
+                # Convert to dictionary for easy lookup
+                ratings_dict = {record['business_id']: record['actual_rating'] 
+                                for record in actual_ratings}
+                
+                # For each recommendation with an actual rating, compute error
+                for _, rec in recommendations.iterrows():
+                    business_id = rec['business_id']
+                    if business_id in ratings_dict:
+                        # Normalize recommendation score to 1-5 scale
+                        predicted_rating = min(5, max(1, rec['score']))
+                        actual_rating = ratings_dict[business_id]
+                        error = (predicted_rating - actual_rating) ** 2
+                        all_errors.append(error)
         
-        return hybrid_recs
+        if not all_errors:
+            return float('inf')  # Return infinity if no errors calculated
+            
+        return np.sqrt(np.mean(all_errors))
     
-    def popularity_based_recommendation(self, train_df, test_users, top_n=10):
+    def evaluate_precision_recall_at_k(self, test_users, k=10, threshold=4):
         """
-        Simple popularity-based recommendation as a baseline
-        
-        Parameters:
-        - train_df: Training data
-        - test_users: List of user indices to generate recommendations for
-        - top_n: Number of top items to recommend
-        
-        Returns:
-        - Dictionary of user_idx -> [(item_idx, score), ...]
+        Evaluate using precision and recall at k
         """
-        # Group by business and calculate average rating and count
-        business_stats = train_df.groupby('business_idx').agg(
-            avg_rating=('rating', 'mean'),
-            count=('rating', 'count')
-        ).reset_index()
+        precisions = []
+        recalls = []
         
-        # Sort by count (popularity) and then by average rating
-        business_stats = business_stats.sort_values(['count', 'avg_rating'], ascending=[False, False])
-        
-        # Get top-N most popular items
-        popular_items = business_stats.head(top_n)
-        
-        # For each user, recommend the same popular items
-        recommendations = {}
-        for user in test_users:
-            # Get items this user hasn't rated in training set
-            user_rated_items = set(train_df[train_df['user_idx'] == user]['business_idx'])
+        for user_id in test_users:
+            # Get recommendations for this user
+            recommendations = self.recommender.hybrid_recommendation(user_id, n=k)
             
-            # Filter popular items not rated by this user
-            user_recs = []
-            for _, item in popular_items.iterrows():
-                if item['business_idx'] not in user_rated_items:
-                    user_recs.append((item['business_idx'], item['avg_rating']))
-                    
-            recommendations[user] = user_recs
-            
-        return recommendations
+            if recommendations.empty:
+                continue
+                
+            # Get relevant items for this user (rated >= threshold)
+            with self.recommender.driver.session() as session:
+                relevant_businesses = session.run("""
+                    MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
+                    WHERE r.stars >= $threshold
+                    RETURN b.business_id AS business_id
+                """, user_id=user_id, threshold=threshold).values()
+                
+                relevant_businesses = set([item[0] for item in relevant_businesses])
+                
+                # Get the recommended business IDs
+                recommended_businesses = set(recommendations['business_id'].tolist())
+                
+                # Calculate relevant recommended items
+                relevant_recommended = recommended_businesses.intersection(relevant_businesses)
+                
+                # Calculate precision and recall
+                precision = len(relevant_recommended) / len(recommended_businesses) if recommended_businesses else 0
+                recall = len(relevant_recommended) / len(relevant_businesses) if relevant_businesses else 0
+                
+                precisions.append(precision)
+                recalls.append(recall)
+        
+        # Calculate average precision and recall
+        avg_precision = np.mean(precisions) if precisions else 0
+        avg_recall = np.mean(recalls) if recalls else 0
+        f1 = 2 * (avg_precision * avg_recall) / (avg_precision + avg_recall) if (avg_precision + avg_recall) > 0 else 0
+        
+        return {
+            'precision': avg_precision,
+            'recall': avg_recall,
+            'f1': f1
+        }
     
-    def debug_recommendations(self, user_cf_recs, item_cf_recs, graph_recs, popularity_recs, hybrid_recs, test_df, n_users=3):
+    def map_at_k(self, test_users, k=10, threshold=4):
         """
-        Debug function to print sample recommendations vs actual test items
-        
-        Parameters:
-        - *_recs: Various recommendation dictionaries
-        - test_df: Test data
-        - n_users: Number of users to debug
+        Calculate Mean Average Precision at k
         """
-        print("\nDEBUG: Sample Recommendations vs Test Items")
-        print("=" * 80)
+        avg_precisions = []
         
-        # Get users that have recommendations from most methods
-        common_users = set(user_cf_recs.keys()) & set(item_cf_recs.keys()) & set(graph_recs.keys()) & set(popularity_recs.keys())
-        if len(common_users) < n_users:
-            common_users = set(popularity_recs.keys())  # Fallback to users with popularity recs
-        
-        debug_users = list(common_users)[:n_users]
-        
-        for user in debug_users:
-            print(f"\nUser {user}:")
+        for user_id in test_users:
+            # Get recommendations for this user
+            recommendations = self.recommender.hybrid_recommendation(user_id, n=k)
             
-            # Get user's test items
-            test_items = test_df[test_df['user_idx'] == user]
-            print(f"  Actual test items ({len(test_items)}):")
-            for _, item in test_items.iterrows():
-                print(f"    Business {item['business_idx']}: Rating {item['rating']}")
-            
-            # Print recommendations from each method
-            for method_name, recs in [
-                ("User-CF", user_cf_recs.get(user, [])),
-                ("Item-CF", item_cf_recs.get(user, [])),
-                ("Graph", graph_recs.get(user, [])),
-                ("Popularity", popularity_recs.get(user, [])),
-                ("Hybrid", hybrid_recs.get(user, []))
-            ]:
-                print(f"  {method_name} recommendations (top 5):")
-                for business, score in recs[:5]:
-                    # Check if it's in test set
-                    match = test_items[test_items['business_idx'] == business]
-                    if not match.empty:
-                        actual_rating = match.iloc[0]['rating']
-                        print(f"    Business {business}: Score {score:.2f}, Actual Rating: {actual_rating} (HIT)")
-                    else:
-                        print(f"    Business {business}: Score {score:.2f}")
-                        
-        print("=" * 80)
+            if recommendations.empty:
+                continue
+                
+            # Get actual ratings for all businesses
+            with self.recommender.driver.session() as session:
+                actual_ratings = session.run("""
+                    MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
+                    RETURN b.business_id AS business_id, r.stars AS stars
+                """, user_id=user_id)
+                
+                # Create dictionary of business_id -> rating
+                ratings_dict = {record['business_id']: record['stars'] 
+                                for record in actual_ratings}
+                
+                # Calculate precision at each position
+                relevant_count = 0
+                precisions = []
+                
+                for i, (_, rec) in enumerate(recommendations.iterrows(), 1):
+                    business_id = rec['business_id']
+                    if business_id in ratings_dict and ratings_dict[business_id] >= threshold:
+                        relevant_count += 1
+                        precisions.append(relevant_count / i)
+                
+                # Calculate average precision for this user
+                avg_precision = np.mean(precisions) if precisions else 0
+                avg_precisions.append(avg_precision)
+        
+        # Calculate MAP
+        return np.mean(avg_precisions) if avg_precisions else 0
     
-    # Evaluation functions
-    ## def evaluate_recommendations(self, recommendations, test_df, top_n=10):
-    def evaluate_recommendations(self, recommendations, test_df, top_n=10):
+    def evaluate_recommendations(self, test_ratio=0.2, k=10, min_ratings=10):
         """
-        Improved evaluation of recommendations against test data
-        
-        Parameters:
-        - recommendations: Dictionary of user_idx -> [(item_idx, score), ...]
-        - test_df: Test dataset
-        - top_n: Number of top recommendations to consider
-        
-        Returns:
-        - Dictionary of evaluation metrics
+        Run a comprehensive evaluation of the recommendation system
         """
-        # Prepare actual ratings from test set
-        test_ratings = {}
-        for _, row in test_df.iterrows():
-            user = row['user_idx']
-            item = row['business_idx']
-            rating = row['rating']
-            
-            if user not in test_ratings:
-                test_ratings[user] = {}
-            test_ratings[user][item] = rating
+        # Create train/test split
+        train_df, test_df, test_users = self.create_train_test_split(test_ratio, min_ratings)
         
-        # Use a lower threshold for what's considered "relevant" (3.0 instead of higher values)
-        relevance_threshold = 3.0
+        # Sample a subset of users for evaluation (for efficiency)
+        if len(test_users) > 50:
+            test_users = np.random.choice(test_users, 50, replace=False)
         
         # Calculate metrics
-        precision_at_n = []
-        recall_at_n = []
-        ndcg_at_n = []
-        mae_values = []
-        rmse_values = []
+        rmse = self.evaluate_rmse(test_users, k)
+        precision_recall = self.evaluate_precision_recall_at_k(test_users, k)
+        map_score = self.map_at_k(test_users, k)
         
-        evaluated_users = 0
-        users_with_hits = 0
-        total_hits = 0
-        
-        for user, user_recs in recommendations.items():
-            if user not in test_ratings or not user_recs:
-                continue
-            
-            evaluated_users += 1
-            
-            # Get top-N recommendations
-            top_recs = user_recs[:top_n]
-            rec_items = [item for item, _ in top_recs]
-            
-            # Get relevant items (rated at or above threshold in test set)
-            relevant_items = {item for item, rating in test_ratings[user].items() if rating >= relevance_threshold}
-            
-            # Calculate precision and recall
-            if len(rec_items) > 0:
-                hits = len(set(rec_items) & relevant_items)
-                total_hits += hits
-                
-                if hits > 0:
-                    users_with_hits += 1
-                    
-                precision = hits / len(rec_items)
-                precision_at_n.append(precision)
-                
-                if len(relevant_items) > 0:
-                    recall = hits / len(relevant_items)
-                    recall_at_n.append(recall)
-            
-            # Calculate NDCG
-            if len(relevant_items) > 0 and len(rec_items) > 0:
-                # Create graded relevance vector for recommendations
-                relevance = np.zeros(len(rec_items))
-                for i, item in enumerate(rec_items):
-                    if item in test_ratings[user]:
-                        # Use the actual rating as relevance score
-                        relevance[i] = max(0, test_ratings[user][item] - 2)  # Scale ratings 1-5 to relevance 0-3
-                
-                # If we have relevant items, calculate NDCG
-                if np.sum(relevance) > 0:
-                    ndcg = self._calculate_ndcg(relevance)
-                    ndcg_at_n.append(ndcg)
-            
-            # Calculate MAE and RMSE for items in both test set and recommendations
-            pred_ratings = []
-            true_ratings = []
-            
-            for item, score in top_recs:
-                if item in test_ratings[user]:
-                    # Skip inf or NaN scores
-                    if np.isnan(score) or np.isinf(score):
-                        continue
-                        
-                    # Clamp predicted scores to the rating range [1-5]
-                    clamped_score = min(5, max(1, score))
-                    pred_ratings.append(clamped_score)
-                    true_ratings.append(test_ratings[user][item])
-            
-            if len(pred_ratings) > 0:
-                mae = np.mean(np.abs(np.array(pred_ratings) - np.array(true_ratings)))
-                rmse = np.sqrt(np.mean((np.array(pred_ratings) - np.array(true_ratings))**2))
-                
-                # Check for valid values
-                if not (np.isnan(mae) or np.isinf(mae)):
-                    mae_values.append(mae)
-                if not (np.isnan(rmse) or np.isinf(rmse)):
-                    rmse_values.append(rmse)
-        
-        # Add diagnostic information
-        print(f"Evaluated {evaluated_users} users, {users_with_hits} had at least one hit")
-        print(f"Total hits: {total_hits}, Average hits per user: {total_hits/evaluated_users if evaluated_users > 0 else 0:.2f}")
-        
-        # Also print detailed evaluation stats
-        print(f"  Precision@{top_n}: {np.mean(precision_at_n) if precision_at_n else 0:.4f}")
-        print(f"  Recall@{top_n}: {np.mean(recall_at_n) if recall_at_n else 0:.4f}")
-        print(f"  NDCG@{top_n}: {np.mean(ndcg_at_n) if ndcg_at_n else 0:.4f}")
-        print(f"  Hit Rate: {users_with_hits / evaluated_users if evaluated_users > 0 else 0:.4f}")
-        
-        # Aggregate metrics
-        metrics = {
-            'precision@N': np.mean(precision_at_n) if precision_at_n else 0,
-            'recall@N': np.mean(recall_at_n) if recall_at_n else 0,
-            'ndcg@N': np.mean(ndcg_at_n) if ndcg_at_n else 0,
-            'coverage': len(recommendations) / len(test_ratings) if test_ratings else 0,
-            'hit_rate': users_with_hits / evaluated_users if evaluated_users > 0 else 0,
-            'mae': np.mean(mae_values) if mae_values else np.nan,
-            'rmse': np.mean(rmse_values) if rmse_values else np.nan
+        results = {
+            'rmse': rmse,
+            'precision@k': precision_recall['precision'],
+            'recall@k': precision_recall['recall'],
+            'f1@k': precision_recall['f1'],
+            'map@k': map_score
         }
         
-        # Calculate F1 score
-        if metrics['precision@N'] + metrics['recall@N'] > 0:
-            metrics['f1@N'] = 2 * (metrics['precision@N'] * metrics['recall@N']) / (metrics['precision@N'] + metrics['recall@N'])
-        else:
-            metrics['f1@N'] = 0
-            
-        return metrics
+        # Save evaluation results
+        with open(os.path.join('models', 'evaluation_results.json'), 'w') as f:
+            json.dump(results, f, indent=4)
+        
+        return results
 
-    def _calculate_ndcg(self, relevance):
-        """
-        Calculate Normalized Discounted Cumulative Gain
-        
-        Parameters:
-        - relevance: Array of relevance scores
-        
-        Returns:
-        - NDCG value
-        """
-        # Calculate DCG
-        dcg = 0
-        for i, rel in enumerate(relevance):
-            dcg += (2 ** rel - 1) / np.log2(i + 2)  # i+2 because i is 0-indexed
-        
-        # Calculate ideal DCG
-        ideal_relevance = np.sort(relevance)[::-1]  # Sort in descending order
-        idcg = 0
-        for i, rel in enumerate(ideal_relevance):
-            idcg += (2 ** rel - 1) / np.log2(i + 2)
-        
-        # Return NDCG
-        return dcg / idcg if idcg > 0 else 0
 
-    def compare_recommendation_methods(self, train_df, test_df, business_features_df, user_sample=100, top_n=10):
-        """
-        Compare different recommendation methods with improved evaluation
-        
-        Parameters:
-        - train_df: Training data
-        - test_df: Test data
-        - business_features_df: Business features
-        - user_sample: Number of users to sample for evaluation
-        - top_n: Number of top recommendations to evaluate
-        
-        Returns:
-        - Dictionary of evaluation results for each method
-        """
-        # Only sample users who have ratings in the test set
-        test_user_set = set(test_df['user_idx'].unique())
-        train_user_set = set(train_df['user_idx'].unique())
-        eligible_users = list(test_user_set & train_user_set)
-        
-        if len(eligible_users) == 0:
-            print("ERROR: No users found with ratings in both train and test sets")
-            return {}
-        
-        # Sample users to evaluate (users must have ratings in the test set)
-        test_users = np.random.choice(
-            eligible_users, 
-            min(user_sample, len(eligible_users)), 
-            replace=False
-        )
-        
-        print(f"Evaluating recommendations for {len(test_users)} users")
-        
-        # Verify that our selected users have rating data in the test set
-        test_user_ratings = {}
-        for _, row in test_df.iterrows():
-            user = row['user_idx']
-            if user in test_users:
-                if user not in test_user_ratings:
-                    test_user_ratings[user] = []
-                test_user_ratings[user].append(row['business_idx'])
-        
-        users_with_data = len(test_user_ratings)
-        print(f"Found {users_with_data} users with test data out of {len(test_users)} sampled users")
-        
-        if users_with_data == 0:
-            print("ERROR: No sampled users have ratings in the test set")
-            return {}
-        
-        # Generate recommendations using different methods
-        print("Running user-based collaborative filtering...")
-        start_time = time.time()
-        user_cf_recs = self.user_based_cf(train_df, test_users)
-        print(f"User-based CF completed in {time.time() - start_time:.2f} seconds")
-        
-        print("Running item-based collaborative filtering...")
-        start_time = time.time()
-        item_cf_recs = self.item_based_cf(train_df, test_users)
-        print(f"Item-based CF completed in {time.time() - start_time:.2f} seconds")
-        
-        print("Running graph-based recommendation...")
-        start_time = time.time()
-        
-        # For graph-based, need to map indices back to IDs
-        user_idx_to_id = {}
-        for _, row in train_df.iterrows():
-            user_idx_to_id[row['user_idx']] = row['user_id']
-        
-        test_user_ids = [user_idx_to_id.get(idx) for idx in test_users if idx in user_idx_to_id]
-        
-        # Filter out None values
-        test_user_ids = [user_id for user_id in test_user_ids if user_id is not None]
-        
-        # If there are no valid user IDs, set empty graph recommendations
-        if not test_user_ids:
-            print("WARNING: No valid user IDs found for graph-based recommendations")
-            graph_recs = {}
-        else:
-            graph_recs_by_id = self.graph_based_recommendation(test_user_ids)
-            
-            # Convert graph recommendations back to indices format for evaluation
-            id_to_idx = {v: k for k, v in user_idx_to_id.items() if v is not None}
-            
-            # Create a mapping from business_id to business_idx
-            business_id_to_idx = {}
-            for _, row in train_df.iterrows():
-                business_id_to_idx[row['business_id']] = row['business_idx']
-            
-            graph_recs = {}
-            for user_id, recs in graph_recs_by_id.items():
-                if user_id not in id_to_idx:
-                    continue
-                    
-                user_idx = id_to_idx[user_id]
-                graph_recs[user_idx] = []
-                
-                for rec in recs:
-                    business_id = rec['business_id']
-                    if business_id in business_id_to_idx:
-                        business_idx = business_id_to_idx[business_id]
-                        # Normalize score to be between 1-5
-                        score = min(5, max(1, rec['avg_rating']))
-                        graph_recs[user_idx].append((business_idx, score))
-        
-        print(f"Graph-based recommendation completed in {time.time() - start_time:.2f} seconds")
-        
-        # Add a popularity-based recommendation as baseline
-        print("Running popularity-based recommendation (baseline)...")
-        popularity_recs = self.popularity_based_recommendation(train_df, test_users, top_n)
-        
-        # Check if we have valid recommendations to evaluate
-        for method_name, recs in [("User-based CF", user_cf_recs), 
-                                ("Item-based CF", item_cf_recs), 
-                                ("Graph-based", graph_recs),
-                                ("Popularity", popularity_recs)]:
-            total_recs = sum(len(user_recs) for user_recs in recs.values())
-            print(f"{method_name}: {len(recs)} users with recommendations, {total_recs} total recommendations")
-        
-        print("Running hybrid recommendation...")
-        start_time = time.time()
-        hybrid_recs = self.hybrid_recommendation(train_df, test_users, business_features_df)
-        print(f"Hybrid recommendation completed in {time.time() - start_time:.2f} seconds")
-        
-        # Evaluate each method
-        metrics = {
-            'User-based CF': self.evaluate_recommendations(user_cf_recs, test_df, top_n),
-            'Item-based CF': self.evaluate_recommendations(item_cf_recs, test_df, top_n),
-            'Graph-based': self.evaluate_recommendations(graph_recs, test_df, top_n),
-            'Popularity': self.evaluate_recommendations(popularity_recs, test_df, top_n),
-            'Hybrid': self.evaluate_recommendations(hybrid_recs, test_df, top_n)
-        }
-        
-        # Debug: Print sample recommendations vs actual test items for a few users
-        self.debug_recommendations(user_cf_recs, item_cf_recs, graph_recs, popularity_recs, hybrid_recs, test_df, n_users=3)
-        
-        return metrics
-
-    def visualize_metrics(self, metrics):
-        """
-        Visualize evaluation metrics
-        
-        Parameters:
-        - metrics: Dictionary of evaluation results from compare_recommendation_methods
-        """
-        # Create dataframe from metrics
-        methods = list(metrics.keys())
-        
-        # Metrics to plot
-        metric_names = ['precision@N', 'recall@N', 'f1@N', 'ndcg@N', 'coverage']
-        
-        # Create data for plotting
-        plot_data = {}
-        for metric_name in metric_names:
-            plot_data[metric_name] = [metrics[method][metric_name] for method in methods]
-        
-        # Create subplots
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-        axes = axes.flatten()
-        
-        # Plot each metric
-        for i, metric_name in enumerate(metric_names):
-            axes[i].bar(methods, plot_data[metric_name])
-            axes[i].set_title(f'{metric_name}')
-            # Get the maximum value, ensuring it's a valid number
-            max_val = max([v for v in plot_data[metric_name] if not (np.isnan(v) or np.isinf(v))], default=0.1)
-            axes[i].set_ylim(0, max_val * 1.2 + 0.01)
-            axes[i].tick_params(axis='x', rotation=45)
-            
-            # Add values on top of bars
-            for j, value in enumerate(plot_data[metric_name]):
-                if not (np.isnan(value) or np.isinf(value)):
-                    axes[i].text(j, value + 0.005, f'{value:.3f}', ha='center')
-        
-        # Plot error metrics (MAE and RMSE)
-        error_metrics = ['mae', 'rmse']
-        error_data = {}
-        for metric_name in error_metrics:
-            error_data[metric_name] = [metrics[method][metric_name] for method in methods]
-        
-        # Filter out NaN and Inf values for RMSE
-        valid_rmse = [v for v in error_data['rmse'] if not (np.isnan(v) or np.isinf(v))]
-        
-        if valid_rmse:  # Check if there are any valid RMSE values
-            max_rmse = max(valid_rmse)
-            axes[5].bar(methods, [v if not (np.isnan(v) or np.isinf(v)) else 0 for v in error_data['rmse']])
-            axes[5].set_title('RMSE (lower is better)')
-            axes[5].set_ylim(0, max_rmse * 1.2 + 0.01)
-            axes[5].tick_params(axis='x', rotation=45)
-            
-            for j, value in enumerate(error_data['rmse']):
-                if not (np.isnan(value) or np.isinf(value)):
-                    axes[5].text(j, value + 0.005, f'{value:.3f}', ha='center')
-        else:
-            axes[5].set_title('RMSE (No valid data)')
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.models_folder, 'recommendation_metrics.png'))
-        plt.close()
-        
-        # More detailed table of metrics
-        metrics_table = pd.DataFrame(metrics).T
-        
-        # Replace NaN and Inf values with a placeholder for display
-        metrics_table = metrics_table.replace([np.inf, -np.inf], np.nan)
-        metrics_table = metrics_table.fillna('N/A')
-        
-        # Round only numeric values
-        for col in metrics_table.columns:
-            metrics_table[col] = metrics_table[col].apply(lambda x: round(x, 4) if isinstance(x, (int, float)) else x)
-        
-        return metrics_table
-    
+# Example usage
 def main():
     # Neo4j connection details
-    NEO4J_URI = "bolt://localhost:7687"
-    NEO4J_USER = "neo4j"
-    NEO4J_PASSWORD = "password" 
+    uri = "bolt://localhost:7687"
+    user = "neo4j"
+    password = "password"  # Change to your actual password
     
-    # Create recommender with a specified models folder
-    models_folder = 'models'
-    recommender = YelpRecommender(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, models_folder=models_folder)
+    # Create recommendation system
+    rec_system = YelpRecommendationSystem(uri, user, password)
     
     try:
-        # Fetch data from Neo4j
-        print("Fetching data from Neo4j...")
-        ratings_df = recommender.fetch_user_business_ratings()
-        business_features_df = recommender.fetch_business_features()
+        # Check if models exist and load them
+        if os.path.exists(os.path.join('models', 'user_category_preferences.pkl')):
+            print("Loading existing models...")
+            rec_system.load_models()
+        else:
+            # Build and save models
+            print("Building recommendation models...")
+            rec_system.build_user_preference_model()
         
-        # Print some stats about the data
-        print(f"Total ratings: {len(ratings_df)}")
-        print(f"Unique users: {ratings_df['user_id'].nunique()}")
-        print(f"Unique businesses: {ratings_df['business_id'].nunique()}")
-        print(f"Rating distribution: {ratings_df['rating'].value_counts().sort_index()}")
-        
-        # Preprocess data (with improved preprocessing)
-        train_df, test_df, user_to_idx, business_to_idx = recommender.preprocess_data(ratings_df)
-        
-        # Save the mappings
-        recommender.save_mappings(user_to_idx, business_to_idx)
-        
-        # Compare recommendation methods (with a smaller user sample to ensure good coverage)
-        print("Comparing recommendation methods...")
-        metrics = recommender.compare_recommendation_methods(
-            train_df, test_df, business_features_df, user_sample=50
-        )
-        
-        # Visualize results
-        metrics_table = recommender.visualize_metrics(metrics)
-        print("\nRecommendation System Evaluation Results:")
-        print(metrics_table)
-        
-        # Save evaluation metrics
-        recommender.save_evaluation_metrics(metrics, metrics_table)
-        
-        # Save results to CSV in the models folder
-        metrics_table.to_csv(os.path.join(recommender.models_folder, 'recommendation_metrics.csv'))
-        
-        print(f"\nRecommendation system evaluation complete. Results and models saved to {recommender.models_folder}")
-        
-        # [Rest of the main function stays the same]
-        
-        print("\nGenerating sample recommendations for a random user...")
+        # Get a sample user for demonstration
+        with rec_system.driver.session() as session:
+            sample_user = session.run("""
+                MATCH (u:User)-[:WROTE]->(r:Review)
+                WITH u, count(r) AS review_count
+                WHERE review_count >= 10
+                RETURN u.user_id AS user_id
+                LIMIT 1
+            """).single()
             
-        # Get a random user from the test set
-        sample_user_idx = np.random.choice(test_df['user_idx'].unique())
-        sample_user_id = None
+            if not sample_user:
+                print("No suitable user found. Make sure the database is populated.")
+                return
+            
+            user_id = sample_user['user_id']
+            
+            print(f"\nGenerating recommendations for user {user_id}:")
+            
+            # Get recommendations using different methods
+            print("\n--- Collaborative Filtering Recommendations ---")
+            cf_recs = rec_system.collaborative_filtering(user_id, n=5)
+            print(cf_recs[['name', 'avg_stars', 'review_count', 'rec_score']])
+            
+            print("\n--- Content-Based Recommendations ---")
+            cb_recs = rec_system.content_based_recommendation(user_id, n=5)
+            print(cb_recs[['name', 'avg_stars', 'category', 'rec_score']])
+            
+            print("\n--- Hybrid Recommendations ---")
+            hybrid_recs = rec_system.hybrid_recommendation(user_id, n=5)
+            print(hybrid_recs[['name', 'avg_stars', 'review_count', 'score']])
+            
+            # Run evaluation
+            print("\n--- Evaluating Recommendation System ---")
+            evaluator = RecommendationEvaluation(rec_system)
+            metrics = evaluator.evaluate_recommendations(test_ratio=0.2, k=10, min_ratings=5)
+            
+            print("\nEvaluation Metrics:")
+            for metric, value in metrics.items():
+                print(f"{metric}: {value:.4f}")
+            
+            # Save model parameters after tuning (example)
+            print("\n--- Updating Model Parameters ---")
+            rec_system.update_parameters({
+                'similarity_threshold': 0.25,  # Reduced threshold
+                'cf_weight': 0.65,            # Increased collaborative filtering weight
+                'cb_weight': 0.35             # Decreased content-based weight
+            })
     
-        # Find the user_id for this user_idx
-        for user_id, idx in user_to_idx.items():
-            if idx == sample_user_idx:
-                sample_user_id = user_id
-                break
-        
-        if sample_user_id:
-            # Get hybrid recommendations
-            user_recommendations = recommender.graph_based_recommendation([sample_user_id], max_items=10)
-            
-            print(f"\nTop 10 recommendations for user {sample_user_id}:")
-            if sample_user_id in user_recommendations:
-                for i, rec in enumerate(user_recommendations[sample_user_id][:10], 1):
-                    print(f"{i}. {rec['name']} (Rating: {rec['avg_rating']}, Score: {rec['score']})")
-                    print(f"   Categories: {', '.join(rec['matched_categories'][:3])}")
-            else:
-                print("No recommendations found for this user.")
-
     finally:
-        recommender.close()
+        rec_system.close()
 
 if __name__ == "__main__":
     main()
