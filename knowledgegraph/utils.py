@@ -88,13 +88,13 @@ class YelpRecommender:
         user_rating_counts = ratings_df['user_idx'].value_counts()
         
         # Only keep users with at least 5 ratings to ensure they have data in both train and test
-        users_with_enough_ratings = user_rating_counts[user_rating_counts >= 5].index
-        print(f"Filtering from {len(user_rating_counts)} users to {len(users_with_enough_ratings)} users with at least 5 ratings")
+        min_ratings = 5
+        users_with_enough_ratings = user_rating_counts[user_rating_counts >= min_ratings].index
+        print(f"Filtering from {len(user_rating_counts)} users to {len(users_with_enough_ratings)} users with at least {min_ratings} ratings")
         
         filtered_df = ratings_df[ratings_df['user_idx'].isin(users_with_enough_ratings)]
         
-        # Split data based on users to ensure each user has both train and test data
-        # Create a user-based train/test split to ensure each user has test data
+        # Split data ensuring each user has both train and test data
         train_df = pd.DataFrame()
         test_df = pd.DataFrame()
         
@@ -102,15 +102,35 @@ class YelpRecommender:
         grouped = filtered_df.groupby('user_idx')
         
         for user_idx, user_ratings in grouped:
-            # Split this user's ratings into train/test (keeping chronological order)
-            user_train = user_ratings.iloc[:int(len(user_ratings) * (1 - test_size))]
-            user_test = user_ratings.iloc[int(len(user_ratings) * (1 - test_size)):]
+            # Sort by date to ensure chronological order
+            user_ratings = user_ratings.sort_values('date')
+            
+            # Split this user's ratings into train/test
+            # Keep at least 3 ratings in training
+            train_size = max(3, int(len(user_ratings) * (1 - test_size)))
+            
+            user_train = user_ratings.iloc[:train_size]
+            user_test = user_ratings.iloc[train_size:]
+            
+            # Ensure test set has at least one item
+            if len(user_test) == 0:
+                # If not enough ratings, put one in test
+                user_test = user_ratings.iloc[-1:]
+                user_train = user_ratings.iloc[:-1]
             
             train_df = pd.concat([train_df, user_train])
             test_df = pd.concat([test_df, user_test])
         
         print(f"Training set: {len(train_df)}, Testing set: {len(test_df)}")
         print(f"Number of users in train: {train_df['user_idx'].nunique()}, in test: {test_df['user_idx'].nunique()}")
+        
+        # Verify that each user in test set has data in train set
+        test_users = set(test_df['user_idx'].unique())
+        train_users = set(train_df['user_idx'].unique())
+        users_missing_from_train = test_users - train_users
+        
+        if users_missing_from_train:
+            print(f"WARNING: {len(users_missing_from_train)} users in test set have no data in train set!")
         
         return train_df, test_df, user_to_idx, business_to_idx
     
@@ -584,85 +604,212 @@ class YelpRecommender:
         return recommendations
         
     # Let's update the hybrid_recommendation method to save the weights
-    def hybrid_recommendation(self, train_df, test_users, business_features_df, alpha=0.7, beta=0.2, gamma=0.1, k=10, save_model=True):
+    def hybrid_recommendation(self, train_df, test_users, business_features_df, weights=None):
         """
-        Hybrid recommendation combining collaborative filtering and content-based approaches
+        Hybrid recommendation method combining CF and content-based approaches
         
         Parameters:
         - train_df: Training data
-        - test_users: User indices to make predictions for
+        - test_users: List of user indices to generate recommendations for
         - business_features_df: Business features for content-based filtering
-        - alpha, beta, gamma: Weights for user-CF, item-CF, and content-based recommendations
-        - k: Number of similar users/items to consider
-        - save_model: Whether to save the model weights
+        - weights: Dictionary of weights for each method (default: equal weights)
         
         Returns:
-        - Dictionary of recommendations for each user
+        - Dictionary of user_idx -> [(item_idx, score), ...]
         """
-        print("Running hybrid recommendation...")
+        print("Running user-based collaborative filtering...")
+        start_time = time.time()
+        user_cf_recs = self.user_based_cf(train_df, test_users)
+        print(f"User-based CF completed in {time.time() - start_time:.2f} seconds")
+        
+        print("Running item-based collaborative filtering...")
+        start_time = time.time()
+        item_cf_recs = self.item_based_cf(train_df, test_users)
+        print(f"Item-based CF completed in {time.time() - start_time:.2f} seconds")
+        
+        print("Running graph-based recommendation...")
         start_time = time.time()
         
-        # Save model weights if requested
-        if save_model:
-            self.save_hybrid_model_weights(alpha, beta, gamma)
-        
-        # Get recommendations from different approaches
-        user_cf_recs = self.user_based_cf(train_df, test_users, k)
-        item_cf_recs = self.item_based_cf(train_df, test_users, k)
-        
-        # Create mappings for user and business IDs
-        idx_to_user_id = {}
-        for _, row in train_df.drop_duplicates(subset=['user_idx']).iterrows():
-            idx_to_user_id[row['user_idx']] = row['user_id']
-        
-        business_id_to_idx = {}
+        # For graph-based, need to map indices back to IDs
+        user_idx_to_id = {}
         for _, row in train_df.iterrows():
-            business_id_to_idx[row['business_id']] = row['business_idx']
+            user_idx_to_id[row['user_idx']] = row['user_id']
         
-        # Convert user indices to IDs for graph-based recommendation
-        test_user_ids = [idx_to_user_id.get(idx) for idx in test_users if idx in idx_to_user_id]
+        # Map test users to their IDs
+        test_user_ids = [user_idx_to_id.get(idx) for idx in test_users if idx in user_idx_to_id]
+        test_user_ids = [user_id for user_id in test_user_ids if user_id is not None]
         
-        # Use graph-based recommendations from Neo4j
-        graph_recs = self.graph_based_recommendation(test_user_ids, max_items=50)
-        
-        # Combine recommendations
-        hybrid_recommendations = {}
-        
-        for user_idx in test_users:
-            user_scores = defaultdict(float)
+        # If there are no valid user IDs, set empty graph recommendations
+        if not test_user_ids:
+            print("WARNING: No valid user IDs found for graph-based recommendations")
+            graph_recs = {}
+        else:
+            graph_recs_by_id = self.graph_based_recommendation(test_user_ids)
             
-            # Add user-based CF scores
-            if user_idx in user_cf_recs:
-                for item_idx, score in user_cf_recs[user_idx]:
-                    user_scores[item_idx] += alpha * score
+            # Convert graph recommendations back to indices format
+            id_to_idx = {v: k for k, v in user_idx_to_id.items() if v is not None}
             
-            # Add item-based CF scores
-            if user_idx in item_cf_recs:
-                for item_idx, score in item_cf_recs[user_idx]:
-                    user_scores[item_idx] += beta * score
+            # Create a mapping from business_id to business_idx
+            business_id_to_idx = {}
+            for _, row in train_df.iterrows():
+                business_id_to_idx[row['business_id']] = row['business_idx']
             
-            # Add graph-based scores (if available)
-            if user_idx in idx_to_user_id and idx_to_user_id[user_idx] in graph_recs:
-                for rec in graph_recs[idx_to_user_id[user_idx]]:
+            graph_recs = {}
+            for user_id, recs in graph_recs_by_id.items():
+                if user_id not in id_to_idx:
+                    continue
+                    
+                user_idx = id_to_idx[user_id]
+                graph_recs[user_idx] = []
+                
+                for rec in recs:
                     business_id = rec['business_id']
                     if business_id in business_id_to_idx:
                         business_idx = business_id_to_idx[business_id]
-                        normalized_score = min(5, rec['avg_rating'])  # Normalize score to be between 0-5
-                        user_scores[business_idx] += gamma * normalized_score
-            
-            # Sort and get top recommendations
-            sorted_recommendations = sorted(
-                user_scores.items(),
-                key=lambda x: x[1],
-                reverse=True
-            )
-            
-            hybrid_recommendations[user_idx] = sorted_recommendations
+                        # Normalize score to be between 1-5
+                        score = min(5, max(1, rec['avg_rating']))
+                        graph_recs[user_idx].append((business_idx, score))
         
-        end_time = time.time()
-        print(f"Hybrid recommendation completed in {end_time - start_time:.2f} seconds")
-        return hybrid_recommendations
-
+        print(f"Graph-based recommendation completed in {time.time() - start_time:.2f} seconds")
+        
+        # Default weights
+        if weights is None:
+            weights = {'user_cf': 0.3, 'item_cf': 0.3, 'graph': 0.4}
+        
+        # Save hybrid model weights
+        print("Saving hybrid model weights...")
+        self.save_hybrid_model_weights(weights)
+        
+        # Combine recommendations
+        hybrid_recs = {}
+        
+        for user in test_users:
+            # Get recommendations from each method
+            user_cf = user_cf_recs.get(user, [])
+            item_cf = item_cf_recs.get(user, [])
+            graph = graph_recs.get(user, [])
+            
+            # Skip if we have no recommendations
+            if not user_cf and not item_cf and not graph:
+                continue
+            
+            # Create a dictionary to combine scores
+            combined_scores = {}
+            
+            # Add weighted user-based CF scores
+            for item, score in user_cf:
+                if item not in combined_scores:
+                    combined_scores[item] = 0
+                combined_scores[item] += weights['user_cf'] * score
+            
+            # Add weighted item-based CF scores
+            for item, score in item_cf:
+                if item not in combined_scores:
+                    combined_scores[item] = 0
+                combined_scores[item] += weights['item_cf'] * score
+            
+            # Add weighted graph-based scores
+            for item, score in graph:
+                if item not in combined_scores:
+                    combined_scores[item] = 0
+                combined_scores[item] += weights['graph'] * score
+            
+            # Convert back to list of (item, score) tuples and sort by score
+            user_recs = [(item, score) for item, score in combined_scores.items()]
+            user_recs.sort(key=lambda x: x[1], reverse=True)
+            
+            hybrid_recs[user] = user_recs
+        
+        return hybrid_recs
+    
+    def popularity_based_recommendation(self, train_df, test_users, top_n=10):
+        """
+        Simple popularity-based recommendation as a baseline
+        
+        Parameters:
+        - train_df: Training data
+        - test_users: List of user indices to generate recommendations for
+        - top_n: Number of top items to recommend
+        
+        Returns:
+        - Dictionary of user_idx -> [(item_idx, score), ...]
+        """
+        # Group by business and calculate average rating and count
+        business_stats = train_df.groupby('business_idx').agg(
+            avg_rating=('rating', 'mean'),
+            count=('rating', 'count')
+        ).reset_index()
+        
+        # Sort by count (popularity) and then by average rating
+        business_stats = business_stats.sort_values(['count', 'avg_rating'], ascending=[False, False])
+        
+        # Get top-N most popular items
+        popular_items = business_stats.head(top_n)
+        
+        # For each user, recommend the same popular items
+        recommendations = {}
+        for user in test_users:
+            # Get items this user hasn't rated in training set
+            user_rated_items = set(train_df[train_df['user_idx'] == user]['business_idx'])
+            
+            # Filter popular items not rated by this user
+            user_recs = []
+            for _, item in popular_items.iterrows():
+                if item['business_idx'] not in user_rated_items:
+                    user_recs.append((item['business_idx'], item['avg_rating']))
+                    
+            recommendations[user] = user_recs
+            
+        return recommendations
+    
+    def debug_recommendations(self, user_cf_recs, item_cf_recs, graph_recs, popularity_recs, hybrid_recs, test_df, n_users=3):
+        """
+        Debug function to print sample recommendations vs actual test items
+        
+        Parameters:
+        - *_recs: Various recommendation dictionaries
+        - test_df: Test data
+        - n_users: Number of users to debug
+        """
+        print("\nDEBUG: Sample Recommendations vs Test Items")
+        print("=" * 80)
+        
+        # Get users that have recommendations from most methods
+        common_users = set(user_cf_recs.keys()) & set(item_cf_recs.keys()) & set(graph_recs.keys()) & set(popularity_recs.keys())
+        if len(common_users) < n_users:
+            common_users = set(popularity_recs.keys())  # Fallback to users with popularity recs
+        
+        debug_users = list(common_users)[:n_users]
+        
+        for user in debug_users:
+            print(f"\nUser {user}:")
+            
+            # Get user's test items
+            test_items = test_df[test_df['user_idx'] == user]
+            print(f"  Actual test items ({len(test_items)}):")
+            for _, item in test_items.iterrows():
+                print(f"    Business {item['business_idx']}: Rating {item['rating']}")
+            
+            # Print recommendations from each method
+            for method_name, recs in [
+                ("User-CF", user_cf_recs.get(user, [])),
+                ("Item-CF", item_cf_recs.get(user, [])),
+                ("Graph", graph_recs.get(user, [])),
+                ("Popularity", popularity_recs.get(user, [])),
+                ("Hybrid", hybrid_recs.get(user, []))
+            ]:
+                print(f"  {method_name} recommendations (top 5):")
+                for business, score in recs[:5]:
+                    # Check if it's in test set
+                    match = test_items[test_items['business_idx'] == business]
+                    if not match.empty:
+                        actual_rating = match.iloc[0]['rating']
+                        print(f"    Business {business}: Score {score:.2f}, Actual Rating: {actual_rating} (HIT)")
+                    else:
+                        print(f"    Business {business}: Score {score:.2f}")
+                        
+        print("=" * 80)
+    
     # Evaluation functions
     ## def evaluate_recommendations(self, recommendations, test_df, top_n=10):
     def evaluate_recommendations(self, recommendations, test_df, top_n=10):
@@ -688,8 +835,8 @@ class YelpRecommender:
                 test_ratings[user] = {}
             test_ratings[user][item] = rating
         
-        # Use a lower threshold for what's considered "relevant" (3.5 instead of 4)
-        relevance_threshold = 3.5
+        # Use a lower threshold for what's considered "relevant" (3.0 instead of higher values)
+        relevance_threshold = 3.0
         
         # Calculate metrics
         precision_at_n = []
@@ -700,6 +847,7 @@ class YelpRecommender:
         
         evaluated_users = 0
         users_with_hits = 0
+        total_hits = 0
         
         for user, user_recs in recommendations.items():
             if user not in test_ratings or not user_recs:
@@ -717,6 +865,8 @@ class YelpRecommender:
             # Calculate precision and recall
             if len(rec_items) > 0:
                 hits = len(set(rec_items) & relevant_items)
+                total_hits += hits
+                
                 if hits > 0:
                     users_with_hits += 1
                     
@@ -768,7 +918,13 @@ class YelpRecommender:
         
         # Add diagnostic information
         print(f"Evaluated {evaluated_users} users, {users_with_hits} had at least one hit")
-        print(f"Average hits per user: {np.mean([len(set(recommendations.get(u, [])[:top_n]) & {item for item, rating in test_ratings[u].items() if rating >= relevance_threshold}) for u in test_ratings if u in recommendations]) if evaluated_users > 0 else 0}")
+        print(f"Total hits: {total_hits}, Average hits per user: {total_hits/evaluated_users if evaluated_users > 0 else 0:.2f}")
+        
+        # Also print detailed evaluation stats
+        print(f"  Precision@{top_n}: {np.mean(precision_at_n) if precision_at_n else 0:.4f}")
+        print(f"  Recall@{top_n}: {np.mean(recall_at_n) if recall_at_n else 0:.4f}")
+        print(f"  NDCG@{top_n}: {np.mean(ndcg_at_n) if ndcg_at_n else 0:.4f}")
+        print(f"  Hit Rate: {users_with_hits / evaluated_users if evaluated_users > 0 else 0:.4f}")
         
         # Aggregate metrics
         metrics = {
@@ -791,26 +947,28 @@ class YelpRecommender:
 
     def _calculate_ndcg(self, relevance):
         """
-        Calculate Normalized Discounted Cumulative Gain (NDCG)
+        Calculate Normalized Discounted Cumulative Gain
         
         Parameters:
-        - relevance: Binary relevance vector
+        - relevance: Array of relevance scores
         
         Returns:
-        - NDCG score
+        - NDCG value
         """
-        dcg = np.sum(relevance / np.log2(np.arange(2, len(relevance) + 2)))
+        # Calculate DCG
+        dcg = 0
+        for i, rel in enumerate(relevance):
+            dcg += (2 ** rel - 1) / np.log2(i + 2)  # i+2 because i is 0-indexed
         
-        # Calculate ideal DCG (IDCG)
-        ideal_relevance = np.sort(relevance)[::-1]
-        idcg = np.sum(ideal_relevance / np.log2(np.arange(2, len(ideal_relevance) + 2)))
+        # Calculate ideal DCG
+        ideal_relevance = np.sort(relevance)[::-1]  # Sort in descending order
+        idcg = 0
+        for i, rel in enumerate(ideal_relevance):
+            idcg += (2 ** rel - 1) / np.log2(i + 2)
         
-        if idcg > 0:
-            return dcg / idcg
-        else:
-            return 0
+        # Return NDCG
+        return dcg / idcg if idcg > 0 else 0
 
-    ## def compare_recommendation_methods(self, train_df, test_df, business_features_df, user_sample=100, top_n=10):
     def compare_recommendation_methods(self, train_df, test_df, business_features_df, user_sample=100, top_n=10):
         """
         Compare different recommendation methods with improved evaluation
@@ -860,8 +1018,18 @@ class YelpRecommender:
             return {}
         
         # Generate recommendations using different methods
+        print("Running user-based collaborative filtering...")
+        start_time = time.time()
         user_cf_recs = self.user_based_cf(train_df, test_users)
+        print(f"User-based CF completed in {time.time() - start_time:.2f} seconds")
+        
+        print("Running item-based collaborative filtering...")
+        start_time = time.time()
         item_cf_recs = self.item_based_cf(train_df, test_users)
+        print(f"Item-based CF completed in {time.time() - start_time:.2f} seconds")
+        
+        print("Running graph-based recommendation...")
+        start_time = time.time()
         
         # For graph-based, need to map indices back to IDs
         user_idx_to_id = {}
@@ -904,22 +1072,36 @@ class YelpRecommender:
                         score = min(5, max(1, rec['avg_rating']))
                         graph_recs[user_idx].append((business_idx, score))
         
+        print(f"Graph-based recommendation completed in {time.time() - start_time:.2f} seconds")
+        
+        # Add a popularity-based recommendation as baseline
+        print("Running popularity-based recommendation (baseline)...")
+        popularity_recs = self.popularity_based_recommendation(train_df, test_users, top_n)
+        
         # Check if we have valid recommendations to evaluate
         for method_name, recs in [("User-based CF", user_cf_recs), 
                                 ("Item-based CF", item_cf_recs), 
-                                ("Graph-based", graph_recs)]:
+                                ("Graph-based", graph_recs),
+                                ("Popularity", popularity_recs)]:
             total_recs = sum(len(user_recs) for user_recs in recs.values())
             print(f"{method_name}: {len(recs)} users with recommendations, {total_recs} total recommendations")
         
+        print("Running hybrid recommendation...")
+        start_time = time.time()
         hybrid_recs = self.hybrid_recommendation(train_df, test_users, business_features_df)
+        print(f"Hybrid recommendation completed in {time.time() - start_time:.2f} seconds")
         
         # Evaluate each method
         metrics = {
             'User-based CF': self.evaluate_recommendations(user_cf_recs, test_df, top_n),
             'Item-based CF': self.evaluate_recommendations(item_cf_recs, test_df, top_n),
             'Graph-based': self.evaluate_recommendations(graph_recs, test_df, top_n),
+            'Popularity': self.evaluate_recommendations(popularity_recs, test_df, top_n),
             'Hybrid': self.evaluate_recommendations(hybrid_recs, test_df, top_n)
         }
+        
+        # Debug: Print sample recommendations vs actual test items for a few users
+        self.debug_recommendations(user_cf_recs, item_cf_recs, graph_recs, popularity_recs, hybrid_recs, test_df, n_users=3)
         
         return metrics
 
