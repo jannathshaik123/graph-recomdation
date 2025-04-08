@@ -7,6 +7,8 @@ from neo4j import GraphDatabase
 from sklearn.metrics import mean_squared_error, precision_score, recall_score, f1_score
 from sklearn.model_selection import train_test_split
 from collections import defaultdict
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 class YelpRecommendationSystem:
     def __init__(self, uri, user, password):
@@ -33,6 +35,7 @@ class YelpRecommendationSystem:
             result = session.run("""
                 MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
                 RETURN u.user_id AS user_id, b.business_id AS business_id, r.stars AS stars
+                LIMIT 100000  // Added limit to prevent memory issues
             """)
             
             ratings = []
@@ -45,9 +48,10 @@ class YelpRecommendationSystem:
             
             return pd.DataFrame(ratings)
     
-    def build_user_preference_model(self, save_path='models'):
+    def build_user_preference_model(self, save_path='models', batch_size=1000):
         """
         Build and save user preference models for faster recommendations
+        Using batched processing to avoid memory issues
         """
         # Ensure the directory exists
         os.makedirs(save_path, exist_ok=True)
@@ -73,33 +77,61 @@ class YelpRecommendationSystem:
             with open(os.path.join(save_path, 'user_category_preferences.pkl'), 'wb') as f:
                 pickle.dump(self.user_preferences, f)
                 
-            # Build user-user similarities
-            print("Building user similarity model...")
-            user_similarity_result = session.run("""
-                MATCH (u1:User)-[:WROTE]->(r1:Review)-[:ABOUT]->(b:Business)<-[:ABOUT]-(r2:Review)<-[:WROTE]-(u2:User)
-                WHERE u1 <> u2
-                WITH u1.user_id AS user1, u2.user_id AS user2, 
-                     count(b) AS common_businesses,
-                     sum(abs(r1.stars - r2.stars)) AS total_diff
-                WHERE common_businesses >= 5
-                RETURN user1, user2, common_businesses, 
-                       total_diff / common_businesses AS avg_diff
-                ORDER BY common_businesses DESC, avg_diff ASC
-            """)
+            # Build user-user similarities in batches
+            print("Building user similarity model in batches...")
+            
+            # First, get a list of all users with sufficient reviews
+            active_users = session.run("""
+                MATCH (u:User)-[:WROTE]->(r:Review)
+                WITH u, count(r) AS review_count
+                WHERE review_count >= 5
+                RETURN u.user_id AS user_id
+                ORDER BY review_count DESC
+                LIMIT 5000  // Limit to most active users
+            """).values()
+            
+            active_users = [item[0] for item in active_users]
+            print(f"Processing similarities for {len(active_users)} active users")
             
             user_similarities = defaultdict(dict)
-            for record in user_similarity_result:
-                user1 = record['user1']
-                user2 = record['user2']
-                common = record['common_businesses']
-                avg_diff = record['avg_diff']
+            
+            # Process in batches to avoid memory issues
+            for i in range(0, len(active_users), batch_size):
+                batch_users = active_users[i:i+batch_size]
+                print(f"Processing batch {i//batch_size + 1}/{len(active_users)//batch_size + 1} ({len(batch_users)} users)")
                 
-                # Calculate similarity score (higher is better)
-                similarity = (1 / (1 + avg_diff)) * np.log1p(common)
-                
-                # Only store if similarity is above threshold
-                if similarity > 0.2:  # Threshold to keep model size manageable
-                    user_similarities[user1][user2] = similarity
+                # Use a more efficient query with SKIP and LIMIT
+                for user_idx, user_id in enumerate(batch_users):
+                    if user_idx % 100 == 0:
+                        print(f"  Processing user {user_idx}/{len(batch_users)}")
+                    
+                    # Get users with similar ratings more efficiently
+                    user_similarity_result = session.run("""
+                        MATCH (u1:User {user_id: $user_id})-[:WROTE]->(r1:Review)-[:ABOUT]->(b:Business)
+                        WITH u1, b, r1.stars AS r1_stars
+                        MATCH (b)<-[:ABOUT]-(r2:Review)<-[:WROTE]-(u2:User)
+                        WHERE u1 <> u2
+                        WITH u2.user_id AS user2, COUNT(b) AS common_businesses, 
+                             SUM(ABS(r1_stars - r2.stars)) AS total_diff
+                        WHERE common_businesses >= 3  // Reduced threshold
+                        WITH user2, common_businesses, total_diff / common_businesses AS avg_diff
+                        ORDER BY common_businesses DESC, avg_diff ASC
+                        LIMIT 20  // Only keep top 20 similar users
+                        RETURN user2, common_businesses, avg_diff
+                    """, user_id=user_id)
+                    
+                    # Process results for this user
+                    for record in user_similarity_result:
+                        user2 = record['user2']
+                        common = record['common_businesses']
+                        avg_diff = record['avg_diff']
+                        
+                        # Calculate similarity score (higher is better)
+                        similarity = (1 / (1 + avg_diff)) * np.log1p(common)
+                        
+                        # Only store if similarity is above threshold
+                        if similarity > 0.2:  # Threshold to keep model size manageable
+                            user_similarities[user_id][user2] = similarity
             
             # Save the user similarities
             self.user_similarities = dict(user_similarities)
@@ -163,25 +195,27 @@ class YelpRecommendationSystem:
                         'similarity': similarity
                     })
             
-            # If no pre-computed similarities, fetch from database
+            # If no pre-computed similarities, fetch from database with optimized query
             if not similar_users:
                 similar_users_result = session.run("""
                     MATCH (target:User {user_id: $user_id})-[:WROTE]->(r1:Review)-[:ABOUT]->(b:Business)
-                    MATCH (other:User)-[:WROTE]->(r2:Review)-[:ABOUT]->(b)
+                    WITH target, b, r1.stars AS r1_stars
+                    MATCH (b)<-[:ABOUT]-(r2:Review)<-[:WROTE]-(other:User)
                     WHERE target <> other
                     WITH other.user_id AS other_user_id, 
                          count(b) AS common_businesses,
-                         abs(avg(r1.stars - r2.stars)) AS rating_diff
-                    WHERE common_businesses > 5
-                    RETURN other_user_id, common_businesses, rating_diff
-                    ORDER BY rating_diff ASC, common_businesses DESC
+                         sum(abs(r1_stars - r2.stars)) AS rating_diff
+                    WHERE common_businesses >= 3
+                    WITH other_user_id, common_businesses, rating_diff / common_businesses AS avg_diff
+                    ORDER BY avg_diff ASC, common_businesses DESC
                     LIMIT 50
+                    RETURN other_user_id, common_businesses, avg_diff
                 """, user_id=target_user_id)
                 
                 for record in similar_users_result:
                     similar_user_id = record['other_user_id']
                     common_businesses = record['common_businesses']
-                    rating_diff = record['rating_diff']
+                    rating_diff = record['avg_diff']
                     
                     # Skip users with too different ratings
                     if rating_diff > similarity_threshold:
@@ -198,29 +232,35 @@ class YelpRecommendationSystem:
             # Get recommendations from similar users
             recommendations = []
             
-            for user_data in similar_users:
-                similar_user_id = user_data['other_user_id']
-                similarity = user_data['similarity']
+            # Process similar users in smaller batches to avoid memory issues
+            batch_size = 10
+            for i in range(0, len(similar_users), batch_size):
+                batch = similar_users[i:i+batch_size]
                 
-                # Get highly-rated businesses from this similar user that target user hasn't rated
-                similar_user_businesses = session.run("""
-                    MATCH (u:User {user_id: $similar_user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
-                    WHERE r.stars >= 4 AND NOT b.business_id IN $rated_businesses
-                    RETURN b.business_id AS business_id, b.name AS name, b.stars AS avg_stars, 
-                           r.stars AS user_stars, b.review_count AS review_count
-                """, similar_user_id=similar_user_id, rated_businesses=rated_businesses)
-                
-                for business in similar_user_businesses:
-                    # Calculate recommendation score
-                    rec_score = similarity * business['user_stars']
+                for user_data in batch:
+                    similar_user_id = user_data['other_user_id']
+                    similarity = user_data['similarity']
                     
-                    recommendations.append({
-                        'business_id': business['business_id'],
-                        'name': business['name'],
-                        'avg_stars': business['avg_stars'],
-                        'rec_score': rec_score,
-                        'review_count': business['review_count']
-                    })
+                    # Get highly-rated businesses from this similar user that target user hasn't rated
+                    similar_user_businesses = session.run("""
+                        MATCH (u:User {user_id: $similar_user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
+                        WHERE r.stars >= 4 AND NOT b.business_id IN $rated_businesses
+                        RETURN b.business_id AS business_id, b.name AS name, b.stars AS avg_stars, 
+                               r.stars AS user_stars, b.review_count AS review_count
+                        LIMIT 20  // Added limit to prevent memory issues
+                    """, similar_user_id=similar_user_id, rated_businesses=rated_businesses)
+                    
+                    for business in similar_user_businesses:
+                        # Calculate recommendation score
+                        rec_score = similarity * business['user_stars']
+                        
+                        recommendations.append({
+                            'business_id': business['business_id'],
+                            'name': business['name'],
+                            'avg_stars': business['avg_stars'],
+                            'rec_score': rec_score,
+                            'review_count': business['review_count']
+                        })
             
             # Sort and remove duplicates
             recommendations_df = pd.DataFrame(recommendations)
@@ -241,6 +281,7 @@ class YelpRecommendationSystem:
             rated_businesses = session.run("""
                 MATCH (u:User {user_id: $user_id})-[:WROTE]->()-[:ABOUT]->(b:Business)
                 RETURN b.business_id AS business_id
+                LIMIT 1000  // Added limit to prevent memory issues
             """, user_id=target_user_id).values()
             
             rated_businesses = [item[0] for item in rated_businesses]
@@ -250,7 +291,7 @@ class YelpRecommendationSystem:
             if target_user_id in self.user_preferences:
                 category_weights = self.user_preferences[target_user_id]
             
-            # If no pre-computed preferences, fetch from database
+            # If no pre-computed preferences, fetch from database with optimized query
             if not category_weights:
                 # Find categories the user likes based on high ratings
                 liked_categories = session.run("""
@@ -271,28 +312,35 @@ class YelpRecommendationSystem:
             # Find businesses in those categories that the user hasn't rated
             recommendations = []
             
-            for category, weight in category_weights.items():
-                category_businesses = session.run("""
-                    MATCH (c:Category {name: $category})<-[:IN_CATEGORY]-(b:Business)
-                    WHERE NOT b.business_id IN $rated_businesses
-                    AND b.stars >= 3.5 AND b.review_count >= 10
-                    RETURN b.business_id AS business_id, b.name AS name, 
-                           b.stars AS avg_stars, b.review_count AS review_count
-                    LIMIT 25
-                """, category=category, rated_businesses=rated_businesses)
+            # Process categories in batches to avoid memory issues
+            category_list = list(category_weights.items())
+            batch_size = 5  # Process 5 categories at a time
+            
+            for i in range(0, len(category_list), batch_size):
+                batch_categories = category_list[i:i+batch_size]
                 
-                for business in category_businesses:
-                    # Calculate recommendation score
-                    rec_score = weight * business['avg_stars']
+                for category, weight in batch_categories:
+                    category_businesses = session.run("""
+                        MATCH (c:Category {name: $category})<-[:IN_CATEGORY]-(b:Business)
+                        WHERE NOT b.business_id IN $rated_businesses
+                        AND b.stars >= 3.5 AND b.review_count >= 10
+                        RETURN b.business_id AS business_id, b.name AS name, 
+                               b.stars AS avg_stars, b.review_count AS review_count
+                        LIMIT 25
+                    """, category=category, rated_businesses=rated_businesses)
                     
-                    recommendations.append({
-                        'business_id': business['business_id'],
-                        'name': business['name'],
-                        'avg_stars': business['avg_stars'],
-                        'category': category,
-                        'rec_score': rec_score,
-                        'review_count': business['review_count']
-                    })
+                    for business in category_businesses:
+                        # Calculate recommendation score
+                        rec_score = weight * business['avg_stars']
+                        
+                        recommendations.append({
+                            'business_id': business['business_id'],
+                            'name': business['name'],
+                            'avg_stars': business['avg_stars'],
+                            'category': category,
+                            'rec_score': rec_score,
+                            'review_count': business['review_count']
+                        })
             
             # Sort and remove duplicates
             recommendations_df = pd.DataFrame(recommendations)
@@ -376,6 +424,7 @@ class YelpRecommendationSystem:
             rated_businesses = session.run("""
                 MATCH (u:User {user_id: $user_id})-[:WROTE]->()-[:ABOUT]->(b:Business)
                 RETURN b.business_id AS business_id
+                LIMIT 1000  // Added limit to prevent memory issues
             """, user_id=target_user_id).values()
             
             rated_businesses = [item[0] for item in rated_businesses]
@@ -396,35 +445,50 @@ class YelpRecommendationSystem:
             if not similar_user_ids:
                 return self.popular_businesses_recommendation(n)
             
-            # Find businesses highly rated by similar users that target user hasn't rated
-            result = session.run("""
-                MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
-                WHERE u.user_id IN $similar_users
-                AND NOT b.business_id IN $rated_businesses
-                AND r.stars >= 4
-                WITH b, avg(r.stars) AS avg_user_rating, count(u) AS user_count
-                WHERE user_count >= 2
-                RETURN b.business_id AS business_id, b.name AS name,
-                       b.stars AS avg_stars, b.review_count AS review_count,
-                       avg_user_rating, user_count,
-                       avg_user_rating * log10(user_count + 1) AS score
-                ORDER BY score DESC
-                LIMIT $limit
-            """, similar_users=similar_user_ids, rated_businesses=rated_businesses, limit=n)
-            
+            # Process similar users in batches
+            batch_size = 10
             recommendations = []
-            for record in result:
-                recommendations.append({
-                    'business_id': record['business_id'],
-                    'name': record['name'],
-                    'avg_stars': record['avg_stars'],
-                    'avg_user_rating': record['avg_user_rating'],
-                    'user_count': record['user_count'],
-                    'review_count': record['review_count'],
-                    'score': record['score']
-                })
             
-            return pd.DataFrame(recommendations)
+            for i in range(0, len(similar_user_ids), batch_size):
+                batch_users = similar_user_ids[i:i+batch_size]
+                
+                # Find businesses highly rated by this batch of similar users
+                result = session.run("""
+                    MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
+                    WHERE u.user_id IN $batch_users
+                    AND NOT b.business_id IN $rated_businesses
+                    AND r.stars >= 4
+                    WITH b, avg(r.stars) AS avg_user_rating, count(u) AS user_count
+                    WHERE user_count >= 2
+                    RETURN b.business_id AS business_id, b.name AS name,
+                           b.stars AS avg_stars, b.review_count AS review_count,
+                           avg_user_rating, user_count,
+                           avg_user_rating * log10(user_count + 1) AS score
+                    ORDER BY score DESC
+                    LIMIT 20
+                """, batch_users=batch_users, rated_businesses=rated_businesses)
+                
+                for record in result:
+                    recommendations.append({
+                        'business_id': record['business_id'],
+                        'name': record['name'],
+                        'avg_stars': record['avg_stars'],
+                        'avg_user_rating': record['avg_user_rating'],
+                        'user_count': record['user_count'],
+                        'review_count': record['review_count'],
+                        'score': record['score']
+                    })
+            
+            # Convert to DataFrame
+            recommendations_df = pd.DataFrame(recommendations)
+            if recommendations_df.empty:
+                return self.popular_businesses_recommendation(n)
+                
+            # Sort by score and remove duplicates
+            recommendations_df = recommendations_df.sort_values('score', ascending=False)
+            recommendations_df = recommendations_df.drop_duplicates(subset=['business_id'])
+            
+            return recommendations_df.head(n)
     
     def recommend_for_user(self, user_id, method='hybrid', n=10):
         """
@@ -466,16 +530,21 @@ class RecommendationEvaluation:
     def __init__(self, recommender):
         self.recommender = recommender
         
-    def create_train_test_split(self, test_ratio=0.2, min_ratings=10):
+    def create_train_test_split(self, test_ratio=0.2, min_ratings=10, max_users=1000):
         """
         Split user ratings into training and testing datasets
+        With memory optimization limits
         """
-        # Fetch all ratings
+        # Fetch all ratings with limit
         ratings_df = self.recommender.fetch_user_business_ratings()
         
         # Get users with sufficient number of ratings
         user_counts = ratings_df['user_id'].value_counts()
         eligible_users = user_counts[user_counts >= min_ratings].index.tolist()
+        
+        # Limit number of users to evaluate
+        if len(eligible_users) > max_users:
+            eligible_users = eligible_users[:max_users]
         
         # Filter ratings to only include eligible users
         eligible_ratings = ratings_df[ratings_df['user_id'].isin(eligible_users)]
@@ -497,11 +566,15 @@ class RecommendationEvaluation:
         
         return train_df, test_df, eligible_users
     
-    def evaluate_rmse(self, test_users, k=10):
+    def evaluate_rmse(self, test_users, k=10, max_users=50):
         """
         Evaluate using Root Mean Squared Error
         Lower RMSE is better
         """
+        # Limit number of users to evaluate
+        if len(test_users) > max_users:
+            test_users = test_users[:max_users]
+            
         all_errors = []
         
         for user_id in test_users:
@@ -538,10 +611,14 @@ class RecommendationEvaluation:
             
         return np.sqrt(np.mean(all_errors))
     
-    def evaluate_precision_recall_at_k(self, test_users, k=10, threshold=4):
+    def evaluate_precision_recall_at_k(self, test_users, k=10, threshold=4, max_users=50):
         """
         Evaluate using precision and recall at k
         """
+        # Limit number of users to evaluate
+        if len(test_users) > max_users:
+            test_users = test_users[:max_users]
+            
         precisions = []
         recalls = []
         
@@ -586,10 +663,14 @@ class RecommendationEvaluation:
             'f1': f1
         }
     
-    def map_at_k(self, test_users, k=10, threshold=4):
+    def map_at_k(self, test_users, k=10, threshold=4, max_users=50):
         """
         Calculate Mean Average Precision at k
         """
+        # Limit number of users to evaluate
+        if len(test_users) > max_users:
+            test_users = test_users[:max_users]
+            
         avg_precisions = []
         
         for user_id in test_users:
@@ -627,107 +708,227 @@ class RecommendationEvaluation:
         # Calculate MAP
         return np.mean(avg_precisions) if avg_precisions else 0
     
+    # Completing the evaluate_recommendations method
     def evaluate_recommendations(self, test_ratio=0.2, k=10, min_ratings=10):
         """
         Run a comprehensive evaluation of the recommendation system
         """
-        # Create train/test split
-        train_df, test_df, test_users = self.create_train_test_split(test_ratio, min_ratings)
+        # Create train/test split with limited number of users
+        train_df, test_df, test_users = self.create_train_test_split(test_ratio=test_ratio, min_ratings=min_ratings)
         
-        # Sample a subset of users for evaluation (for efficiency)
-        if len(test_users) > 50:
-            test_users = np.random.choice(test_users, 50, replace=False)
+        print(f"Evaluation using {len(test_users)} users with {len(test_df)} test ratings")
         
-        # Calculate metrics
-        rmse = self.evaluate_rmse(test_users, k)
-        precision_recall = self.evaluate_precision_recall_at_k(test_users, k)
-        map_score = self.map_at_k(test_users, k)
+        # Calculate RMSE
+        rmse = self.evaluate_rmse(test_users, k=k)
         
-        results = {
+        # Calculate precision, recall, F1
+        precision_recall = self.evaluate_precision_recall_at_k(test_users, k=k)
+        
+        # Calculate MAP
+        map_score = self.map_at_k(test_users, k=k)
+        
+        # Return all metrics
+        metrics = {
             'rmse': rmse,
-            'precision@k': precision_recall['precision'],
-            'recall@k': precision_recall['recall'],
-            'f1@k': precision_recall['f1'],
-            'map@k': map_score
+            'precision': precision_recall['precision'],
+            'recall': precision_recall['recall'],
+            'f1': precision_recall['f1'],
+            'map': map_score
         }
         
-        # Save evaluation results
-        with open(os.path.join('models', 'evaluation_results.json'), 'w') as f:
-            json.dump(results, f, indent=4)
+        print("Evaluation Results:")
+        print(f"RMSE: {rmse:.4f}")
+        print(f"Precision@{k}: {precision_recall['precision']:.4f}")
+        print(f"Recall@{k}: {precision_recall['recall']:.4f}")
+        print(f"F1@{k}: {precision_recall['f1']:.4f}")
+        print(f"MAP@{k}: {map_score:.4f}")
         
-        return results
+        return metrics
 
 
 # Example usage
 def main():
     # Neo4j connection details
-    uri = "bolt://localhost:7687"
-    user = "neo4j"
-    password = "password"  # Change to your actual password
+    uri = "neo4j://localhost:7687"  # Update with your Neo4j URI
+    user = "neo4j"                  # Update with your username
+    password = "password"           # Update with your password
     
-    # Create recommendation system
-    rec_system = YelpRecommendationSystem(uri, user, password)
+    # Initialize the recommendation system
+    print("Initializing Yelp Recommendation System...")
+    recommender = YelpRecommendationSystem(uri, user, password)
     
-    try:
-        # Check if models exist and load them
-        if os.path.exists(os.path.join('models', 'user_category_preferences.pkl')):
-            print("Loading existing models...")
-            rec_system.load_models()
+    # Try to load existing models
+    if not recommender.load_models():
+        print("Building models...")
+        recommender.build_user_preference_model(batch_size=500)
+    
+    # Example 1: Get recommendations for a specific user
+    example_user_id = "Wc5L5WJAkEP98hLI8xb9gQ"  # Replace with an actual user ID
+    print(f"\nGenerating recommendations for user {example_user_id}...")
+    
+    # Get recommendations using different methods
+    methods = ['collaborative', 'content', 'hybrid', 'demographic']
+    for method in methods:
+        print(f"\n{method.capitalize()} Filtering Recommendations:")
+        recommendations = recommender.recommend_for_user(example_user_id, method=method, n=5)
+        if not recommendations.empty:
+            print(recommendations[['name', 'avg_stars', 'score']].to_string(index=False))
         else:
-            # Build and save models
-            print("Building recommendation models...")
-            rec_system.build_user_preference_model()
-        
-        # Get a sample user for demonstration
-        with rec_system.driver.session() as session:
-            sample_user = session.run("""
-                MATCH (u:User)-[:WROTE]->(r:Review)
-                WITH u, count(r) AS review_count
-                WHERE review_count >= 10
-                RETURN u.user_id AS user_id
-                LIMIT 1
-            """).single()
-            
-            if not sample_user:
-                print("No suitable user found. Make sure the database is populated.")
-                return
-            
-            user_id = sample_user['user_id']
-            
-            print(f"\nGenerating recommendations for user {user_id}:")
-            
-            # Get recommendations using different methods
-            print("\n--- Collaborative Filtering Recommendations ---")
-            cf_recs = rec_system.collaborative_filtering(user_id, n=5)
-            print(cf_recs[['name', 'avg_stars', 'review_count', 'rec_score']])
-            
-            print("\n--- Content-Based Recommendations ---")
-            cb_recs = rec_system.content_based_recommendation(user_id, n=5)
-            print(cb_recs[['name', 'avg_stars', 'category', 'rec_score']])
-            
-            print("\n--- Hybrid Recommendations ---")
-            hybrid_recs = rec_system.hybrid_recommendation(user_id, n=5)
-            print(hybrid_recs[['name', 'avg_stars', 'review_count', 'score']])
-            
-            # Run evaluation
-            print("\n--- Evaluating Recommendation System ---")
-            evaluator = RecommendationEvaluation(rec_system)
-            metrics = evaluator.evaluate_recommendations(test_ratio=0.2, k=10, min_ratings=5)
-            
-            print("\nEvaluation Metrics:")
-            for metric, value in metrics.items():
-                print(f"{metric}: {value:.4f}")
-            
-            # Save model parameters after tuning (example)
-            print("\n--- Updating Model Parameters ---")
-            rec_system.update_parameters({
-                'similarity_threshold': 0.25,  # Reduced threshold
-                'cf_weight': 0.65,            # Increased collaborative filtering weight
-                'cb_weight': 0.35             # Decreased content-based weight
-            })
+            print("No recommendations found using this method.")
     
-    finally:
-        rec_system.close()
+    # Example 2: Run evaluation
+    print("\nRunning evaluation...")
+    evaluator = RecommendationEvaluation(recommender)
+    metrics = evaluator.evaluate_recommendations(test_ratio=0.2, k=10, min_ratings=5)
+    
+    # Example 3: Parameter tuning
+    print("\nTuning model parameters...")
+    best_f1 = metrics['f1']
+    best_params = recommender.parameters.copy()
+    
+    # Try different parameter combinations
+    for cf_weight in [0.5, 0.6, 0.7]:
+        for cb_weight in [0.5, 0.4, 0.3]:
+            for similarity_threshold in [0.2, 0.3, 0.4]:
+                # Update parameters
+                new_params = {
+                    'cf_weight': cf_weight,
+                    'cb_weight': cb_weight,
+                    'similarity_threshold': similarity_threshold
+                }
+                recommender.update_parameters(new_params)
+                
+                # Evaluate with new parameters
+                print(f"Testing parameters: {new_params}")
+                metrics = evaluator.evaluate_recommendations(test_ratio=0.2, k=10, min_ratings=5)
+                
+                # Save if better
+                if metrics['f1'] > best_f1:
+                    best_f1 = metrics['f1']
+                    best_params = new_params.copy()
+                    print(f"Found better parameters: {best_params} with F1: {best_f1:.4f}")
+    
+    # Use the best parameters
+    recommender.update_parameters(best_params)
+    print(f"\nFinal best parameters: {best_params} with F1: {best_f1:.4f}")
+    
+    # Example 4: Generate visualizations of recommendation performance
+    print("\nGenerating visualizations...")
+    
+    # Visualize recommendations by category for a user
+    cb_recs = recommender.content_based_recommendation(example_user_id, n=20)
+    if not cb_recs.empty and 'category' in cb_recs.columns:
+        plt.figure(figsize=(10, 6))
+        category_counts = cb_recs['category'].value_counts().head(10)
+        sns.barplot(x=category_counts.values, y=category_counts.index)
+        plt.title(f"Top Categories Recommended for User {example_user_id}")
+        plt.xlabel("Count")
+        plt.tight_layout()
+        plt.savefig("category_recommendations.png")
+        print("Saved category recommendations visualization")
+    
+    # Get evaluation metrics for different k values
+    k_values = [5, 10, 15, 20]
+    precision_values = []
+    recall_values = []
+    f1_values = []
+    
+    for k in k_values:
+        print(f"Evaluating with k={k}...")
+        metrics = evaluator.evaluate_recommendations(k=k)
+        precision_values.append(metrics['precision'])
+        recall_values.append(metrics['recall'])
+        f1_values.append(metrics['f1'])
+    
+    # Plot metrics vs k
+    plt.figure(figsize=(10, 6))
+    plt.plot(k_values, precision_values, 'o-', label='Precision')
+    plt.plot(k_values, recall_values, 's-', label='Recall')
+    plt.plot(k_values, f1_values, '^-', label='F1')
+    plt.xlabel('k (number of recommendations)')
+    plt.ylabel('Score')
+    plt.title('Recommendation Performance vs. k')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("metrics_vs_k.png")
+    print("Saved metrics visualization")
+    
+    # Example 5: Compare different recommendation methods
+    print("\nComparing recommendation methods...")
+    methods = ['collaborative', 'content', 'hybrid', 'demographic']
+    method_metrics = {}
+    
+    for method in methods:
+        print(f"Evaluating {method} method...")
+        precisions = []
+        recalls = []
+        
+        # Evaluate for a subset of users
+        for user_id in test_users[:20]:
+            recommendations = recommender.recommend_for_user(user_id, method=method, n=10)
+            
+            if recommendations.empty:
+                continue
+                
+            # Get actual ratings for this user
+            with recommender.driver.session() as session:
+                relevant_businesses = session.run("""
+                    MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
+                    WHERE r.stars >= 4
+                    RETURN b.business_id AS business_id
+                """, user_id=user_id).values()
+                
+                relevant_businesses = set([item[0] for item in relevant_businesses])
+                recommended_businesses = set(recommendations['business_id'].tolist())
+                
+                # Calculate relevant recommended items
+                relevant_recommended = recommended_businesses.intersection(relevant_businesses)
+                
+                # Calculate precision and recall
+                precision = len(relevant_recommended) / len(recommended_businesses) if recommended_businesses else 0
+                recall = len(relevant_recommended) / len(relevant_businesses) if relevant_businesses else 0
+                
+                precisions.append(precision)
+                recalls.append(recall)
+        
+        # Calculate average precision and recall
+        avg_precision = np.mean(precisions) if precisions else 0
+        avg_recall = np.mean(recalls) if recalls else 0
+        f1 = 2 * (avg_precision * avg_recall) / (avg_precision + avg_recall) if (avg_precision + avg_recall) > 0 else 0
+        
+        method_metrics[method] = {
+            'precision': avg_precision,
+            'recall': avg_recall,
+            'f1': f1
+        }
+    
+    # Plot comparison
+    plt.figure(figsize=(12, 6))
+    
+    methods_list = list(method_metrics.keys())
+    precision_list = [method_metrics[m]['precision'] for m in methods_list]
+    recall_list = [method_metrics[m]['recall'] for m in methods_list]
+    f1_list = [method_metrics[m]['f1'] for m in methods_list]
+    
+    x = np.arange(len(methods_list))
+    width = 0.25
+    
+    plt.bar(x - width, precision_list, width, label='Precision')
+    plt.bar(x, recall_list, width, label='Recall')
+    plt.bar(x + width, f1_list, width, label='F1')
+    
+    plt.xlabel('Recommendation Method')
+    plt.ylabel('Score')
+    plt.title('Comparison of Recommendation Methods')
+    plt.xticks(x, methods_list)
+    plt.legend()
+    plt.grid(True, axis='y')
+    plt.savefig("method_comparison.png")
+    print("Saved method comparison visualization")
+    
+    # Clean up
+    recommender.close()
+    print("\nDemo completed!")
 
 if __name__ == "__main__":
     main()
