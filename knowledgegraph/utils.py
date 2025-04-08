@@ -30,17 +30,13 @@ class YelpRecommender:
         """Close the Neo4j connection"""
         self.driver.close()
         
+    ## def _fetch_data(self, limit=None):
     def _fetch_data(self, limit=None):
         """Fetch review data from Neo4j"""
         print("Fetching review data from Neo4j...")
         
         with self.driver.session() as session:
             try:
-                # Test connection with simpler query
-                test_query = "MATCH (n) RETURN count(n) as count LIMIT 1"
-                test_result = session.run(test_query).single()
-                print(f"Database connection test: found {test_result['count']} nodes")
-                
                 # Query to get all review data
                 query = """
                 MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
@@ -66,6 +62,11 @@ class YelpRecommender:
                 # Debug: print column names
                 print(f"Columns in returned DataFrame: {df.columns.tolist()}")
                 
+                # Rename numeric columns to expected column names
+                if set(df.columns) == set(range(4)):  # If columns are numeric indices
+                    df.columns = ['user_id', 'business_id', 'rating', 'date']
+                    print("Renamed numeric columns to expected column names")
+                
                 print(f"Fetched {len(df)} reviews")
                 return df
             except Exception as e:
@@ -84,6 +85,15 @@ class YelpRecommender:
             """
             result = session.run(query, business_ids=list(business_ids))
             records = [record for record in result]
+            if not records:
+                print("Warning: No records returned from Neo4j query")
+                return pd.DataFrame(columns=['user_id', 'business_id', 'rating', 'date'])
+            
+            df = pd.DataFrame(records)
+            
+            # Debug: print column names
+            print(f"Columns in returned DataFrame: {df.columns.tolist()}")
+            
             return pd.DataFrame(records)
             
     def _create_mappings(self, df):
@@ -358,6 +368,14 @@ class RecommenderEvaluator:
                 
             result = session.run(query)
             records = [record for record in result]
+            if not records:
+                print("Warning: No records returned from Neo4j query")
+                return pd.DataFrame(columns=['user_id', 'business_id', 'rating', 'date'])
+            
+            df = pd.DataFrame(records)
+            
+            # Debug: print column names
+            print(f"Columns in returned DataFrame: {df.columns.tolist()}")
             return pd.DataFrame(records)
     
     def train_test_split_by_time(self, data=None, test_size=0.2, date_column='date'):
