@@ -35,25 +35,42 @@ class YelpRecommender:
         print("Fetching review data from Neo4j...")
         
         with self.driver.session() as session:
-            # Query to get all review data
-            query = """
-            MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
-            RETURN u.user_id AS user_id, b.business_id AS business_id, 
-                   r.stars AS rating, r.date AS date
-            ORDER BY r.date
-            """
-            
-            if limit:
-                query += f" LIMIT {limit}"
+            try:
+                # Test connection with simpler query
+                test_query = "MATCH (n) RETURN count(n) as count LIMIT 1"
+                test_result = session.run(test_query).single()
+                print(f"Database connection test: found {test_result['count']} nodes")
                 
-            result = session.run(query)
-            
-            # Convert to DataFrame
-            records = [record for record in result]
-            df = pd.DataFrame(records)
-            
-            print(f"Fetched {len(df)} reviews")
-            return df
+                # Query to get all review data
+                query = """
+                MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
+                RETURN u.user_id AS user_id, b.business_id AS business_id, 
+                    r.stars AS rating, r.date AS date
+                ORDER BY r.date
+                """
+                
+                if limit:
+                    query += f" LIMIT {limit}"
+                    
+                result = session.run(query)
+                
+                # Convert to DataFrame
+                records = [record for record in result]
+                
+                if not records:
+                    print("Warning: No records returned from Neo4j query")
+                    return pd.DataFrame(columns=['user_id', 'business_id', 'rating', 'date'])
+                
+                df = pd.DataFrame(records)
+                
+                # Debug: print column names
+                print(f"Columns in returned DataFrame: {df.columns.tolist()}")
+                
+                print(f"Fetched {len(df)} reviews")
+                return df
+            except Exception as e:
+                print(f"Error fetching data from Neo4j: {e}")
+                return pd.DataFrame(columns=['user_id', 'business_id', 'rating', 'date'])
     
     def _fetch_business_info(self, business_ids):
         """Fetch business information for a list of business IDs"""
