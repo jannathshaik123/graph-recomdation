@@ -2,6 +2,8 @@ import os
 import random
 import numpy as np
 import pandas as pd
+import json
+import pickle
 from neo4j import GraphDatabase
 from sklearn.model_selection import train_test_split
 from datetime import datetime
@@ -565,28 +567,190 @@ class YelpRecommendationSystem:
         
         print(f"Train set: {len(train_set)} reviews, Test set: {len(test_set)} reviews")
         return train_set, test_set
+    
+    def save_matrix_factorization_model(self, user_factors, business_factors, global_avg, model_dir="models"):
+        """Save trained matrix factorization model to files"""
+        # Create models directory if it doesn't exist
+        os.makedirs(model_dir, exist_ok=True)
+        
+        # Generate timestamp for model versioning
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Save user factors
+        user_factors_file = os.path.join(model_dir, f"user_factors_{timestamp}.pkl")
+        with open(user_factors_file, 'wb') as f:
+            pickle.dump(user_factors, f)
+        
+        # Save business factors
+        business_factors_file = os.path.join(model_dir, f"business_factors_{timestamp}.pkl")
+        with open(business_factors_file, 'wb') as f:
+            pickle.dump(business_factors, f)
+        
+        # Save global average and metadata
+        metadata = {
+            "global_avg": global_avg,
+            "timestamp": timestamp,
+            "num_users": len(user_factors),
+            "num_businesses": len(business_factors),
+            "factors_shape": next(iter(user_factors.values())).shape[0] - 1  # -1 for bias term
+        }
+        
+        metadata_file = os.path.join(model_dir, f"mf_metadata_{timestamp}.json")
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f)
+        
+        # Save latest model info for easy loading
+        latest_info = {
+            "timestamp": timestamp,
+            "user_factors_file": user_factors_file,
+            "business_factors_file": business_factors_file,
+            "metadata_file": metadata_file
+        }
+        
+        latest_file = os.path.join(model_dir, "latest_model.json")
+        with open(latest_file, 'w') as f:
+            json.dump(latest_info, f)
+        
+        print(f"Model saved successfully to {model_dir} directory with timestamp {timestamp}")
+        return latest_info
 
+    def load_matrix_factorization_model(self, model_dir="models", timestamp=None):
+        """Load trained matrix factorization model from files"""
+        # Check if models directory exists
+        if not os.path.exists(model_dir):
+            print(f"Models directory {model_dir} not found.")
+            return None, None, None
+        
+        try:
+            # If timestamp is not provided, load the latest model
+            if timestamp is None:
+                latest_file = os.path.join(model_dir, "latest_model.json")
+                if not os.path.exists(latest_file):
+                    print("No saved model found.")
+                    return None, None, None
+                
+                with open(latest_file, 'r') as f:
+                    latest_info = json.load(f)
+                
+                timestamp = latest_info["timestamp"]
+                user_factors_file = latest_info["user_factors_file"]
+                business_factors_file = latest_info["business_factors_file"]
+                metadata_file = latest_info["metadata_file"]
+            else:
+                # Use the specified timestamp to locate files
+                user_factors_file = os.path.join(model_dir, f"user_factors_{timestamp}.pkl")
+                business_factors_file = os.path.join(model_dir, f"business_factors_{timestamp}.pkl")
+                metadata_file = os.path.join(model_dir, f"mf_metadata_{timestamp}.json")
+            
+            # Load user factors
+            with open(user_factors_file, 'rb') as f:
+                user_factors = pickle.load(f)
+            
+            # Load business factors
+            with open(business_factors_file, 'rb') as f:
+                business_factors = pickle.load(f)
+            
+            # Load metadata
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+            
+            global_avg = metadata["global_avg"]
+            
+            print(f"Model loaded successfully from {model_dir} with timestamp {timestamp}")
+            print(f"Model contains {metadata['num_users']} users and {metadata['num_businesses']} businesses")
+            return user_factors, business_factors, global_avg
+        
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return None, None, None
+
+    def get_available_models(self, model_dir="models"):
+        """Get list of available trained models"""
+        if not os.path.exists(model_dir):
+            print(f"Models directory {model_dir} not found.")
+            return []
+        
+        # Find all metadata files
+        metadata_files = [f for f in os.listdir(model_dir) if f.startswith("mf_metadata_")]
+        models = []
+        
+        for file in metadata_files:
+            timestamp = file.replace("mf_metadata_", "").replace(".json", "")
+            metadata_path = os.path.join(model_dir, file)
+            
+            try:
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                
+                models.append({
+                    "timestamp": timestamp,
+                    "num_users": metadata.get("num_users", "unknown"),
+                    "num_businesses": metadata.get("num_businesses", "unknown"),
+                    "global_avg": metadata.get("global_avg", "unknown"),
+                    "factors_shape": metadata.get("factors_shape", "unknown")
+                })
+            except Exception as e:
+                print(f"Error reading metadata for {file}: {e}")
+        
+        # Sort by timestamp (newest first)
+        models.sort(key=lambda x: x["timestamp"], reverse=True)
+        return models
 
 def main():
     # Create the recommendation system
     recommender = YelpRecommendationSystem(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
     
     try:
-        # Split data into training and test sets
-        train_set, test_set = recommender.split_train_test(test_size=0.2, min_reviews=3, sample_size=50000)
+        # Check if there are any saved models
+        available_models = recommender.get_available_models()
         
-        if not train_set or not test_set:
-            print("Insufficient data for evaluation.")
-            return
+        user_factors = None
+        business_factors = None
+        global_avg = None
         
-        # Train matrix factorization model
-        user_factors, business_factors, global_avg = recommender.train_matrix_factorization(
-            num_factors=15,
-            learning_rate=0.005,
-            regularization=0.02,
-            num_iterations=20,
-            sample_size=len(train_set)
-        )
+        if available_models:
+            print("\nAvailable models:")
+            for i, model in enumerate(available_models):
+                print(f"{i+1}. Model from {model['timestamp']} - {model['num_users']} users, {model['num_businesses']} businesses")
+            
+            # Option to load existing model or train new one
+            print("\nOptions:")
+            print("1. Load the latest model")
+            print("2. Train a new model")
+            choice = input("Enter your choice (1 or 2): ")
+            
+            if choice == "1":
+                # Load the latest model
+                user_factors, business_factors, global_avg = recommender.load_matrix_factorization_model()
+            else:
+                print("Training new model...")
+        else:
+            print("No saved models found. Training new model...")
+        
+        # If no model loaded, train a new one
+        if user_factors is None:
+            # Split data into training and test sets
+            train_set, test_set = recommender.split_train_test(test_size=0.2, min_reviews=3, sample_size=50000)
+            
+            if not train_set or not test_set:
+                print("Insufficient data for evaluation.")
+                return
+            
+            # Train matrix factorization model
+            user_factors, business_factors, global_avg = recommender.train_matrix_factorization(
+                num_factors=15,
+                learning_rate=0.005,
+                regularization=0.02,
+                num_iterations=20,
+                sample_size=len(train_set)
+            )
+            
+            # Save the trained model
+            recommender.save_matrix_factorization_model(user_factors, business_factors, global_avg)
+        else:
+            # Use the loaded model for evaluation
+            # We need to get test_set for evaluation
+            _, test_set = recommender.split_train_test(test_size=0.2, min_reviews=3, sample_size=10000)
         
         # Evaluate recommendation algorithms
         print("\nEvaluating recommendation algorithms...")
