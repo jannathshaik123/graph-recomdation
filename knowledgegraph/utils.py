@@ -1,690 +1,622 @@
 import os
+import random
 import numpy as np
 import pandas as pd
 from neo4j import GraphDatabase
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import pickle
-import matplotlib.pyplot as plt
-from scipy.sparse.linalg import svds
-import warnings
-warnings.filterwarnings('ignore')
+from datetime import datetime
+from math import sqrt
+from collections import defaultdict
 
 # Neo4j connection configuration
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "password"  # Change this to your actual password
+NEO4J_PASSWORD = "password"
 
-class YelpRecommender:
+class YelpRecommendationSystem:
     def __init__(self, uri, user, password):
-        """Initialize the recommender with Neo4j connection"""
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
-        self.user_mapping = {}  # Maps user_id to matrix index
-        self.business_mapping = {}  # Maps business_id to matrix index
-        self.reverse_user_mapping = {}  # Maps matrix index to user_id
-        self.reverse_business_mapping = {}  # Maps matrix index to business_id
-        self.model = None
-        self.global_average = None
         
     def close(self):
-        """Close the Neo4j connection"""
         self.driver.close()
-        
-    ## def _fetch_data(self, limit=None):
-    def _fetch_data(self, limit=None):
-        """Fetch review data from Neo4j"""
-        print("Fetching review data from Neo4j...")
-        
-        with self.driver.session() as session:
-            try:
-                # Query to get all review data
-                query = """
-                MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
-                RETURN u.user_id AS user_id, b.business_id AS business_id, 
-                    r.stars AS rating, r.date AS date
-                ORDER BY r.date
-                """
-                
-                if limit:
-                    query += f" LIMIT {limit}"
-                    
-                result = session.run(query)
-                
-                # Convert to DataFrame
-                records = [record for record in result]
-                
-                if not records:
-                    print("Warning: No records returned from Neo4j query")
-                    return pd.DataFrame(columns=['user_id', 'business_id', 'rating', 'date'])
-                
-                df = pd.DataFrame(records)
-                
-                # Debug: print column names
-                print(f"Columns in returned DataFrame: {df.columns.tolist()}")
-                
-                # Rename numeric columns to expected column names
-                if set(df.columns) == set(range(4)):  # If columns are numeric indices
-                    df.columns = ['user_id', 'business_id', 'rating', 'date']
-                    print("Renamed numeric columns to expected column names")
-                
-                print(f"Fetched {len(df)} reviews")
-                return df
-            except Exception as e:
-                print(f"Error fetching data from Neo4j: {e}")
-                return pd.DataFrame(columns=['user_id', 'business_id', 'rating', 'date'])
     
-    def _fetch_business_info(self, business_ids):
-        """Fetch business information for a list of business IDs"""
+    def get_user_ratings(self, user_id, limit=None):
+        """Get all ratings (reviews) for a specific user"""
         with self.driver.session() as session:
-            query = """
-            MATCH (b:Business)
-            WHERE b.business_id IN $business_ids
-            RETURN b.business_id AS business_id, b.name AS name, 
-                   b.stars AS avg_rating, b.review_count AS review_count,
-                   b.city AS city
+            limit_clause = f"LIMIT {limit}" if limit else ""
+            query = f"""
+            MATCH (u:User {{user_id: $user_id}})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
+            RETURN b.business_id AS business_id, b.name AS business_name, r.stars AS rating, r.date AS date
+            ORDER BY r.date DESC
+            {limit_clause}
             """
-            result = session.run(query, business_ids=list(business_ids))
-            records = [record for record in result]
-            if not records:
-                print("Warning: No records returned from Neo4j query")
-                return pd.DataFrame(columns=['user_id', 'business_id', 'rating', 'date'])
-            
-            df = pd.DataFrame(records)
-            
-            # Debug: print column names
-            print(f"Columns in returned DataFrame: {df.columns.tolist()}")
-            
-            return pd.DataFrame(records)
-            
-    def _create_mappings(self, df):
-        """Create mapping dictionaries for users and businesses"""
-        print("Creating user and business mappings...")
-        
-        # Create user mapping
-        unique_users = df['user_id'].unique()
-        self.user_mapping = {user_id: idx for idx, user_id in enumerate(unique_users)}
-        self.reverse_user_mapping = {idx: user_id for user_id, idx in self.user_mapping.items()}
-        
-        # Create business mapping
-        unique_businesses = df['business_id'].unique()
-        self.business_mapping = {biz_id: idx for idx, biz_id in enumerate(unique_businesses)}
-        self.reverse_business_mapping = {idx: biz_id for biz_id, idx in self.business_mapping.items()}
-        
-        print(f"Created mappings for {len(unique_users)} users and {len(unique_businesses)} businesses")
+            result = session.run(query, user_id=user_id)
+            return [dict(record) for record in result]
     
-    def _create_ratings_matrix(self, df):
-        """Create the user-item ratings matrix"""
-        print("Creating user-item ratings matrix...")
-        
-        num_users = len(self.user_mapping)
-        num_businesses = len(self.business_mapping)
-        
-        # Initialize ratings matrix with zeros
-        ratings_matrix = np.zeros((num_users, num_businesses))
-        
-        # Fill the matrix with ratings
-        for _, row in df.iterrows():
-            user_idx = self.user_mapping[row['user_id']]
-            business_idx = self.business_mapping[row['business_id']]
-            ratings_matrix[user_idx, business_idx] = row['rating']
-        
-        # Calculate global average for unrated items
-        self.global_average = df['rating'].mean()
-        
-        print(f"Created ratings matrix of shape {ratings_matrix.shape}")
-        return ratings_matrix
-    
-    def train(self, n_factors=50, limit=None):
-        """Train the collaborative filtering model with SVD"""
-        print("Training recommendation model...")
-        
-        # Fetch data
-        df = self._fetch_data(limit=limit)
-        
-        # Create mappings
-        self._create_mappings(df)
-        
-        # Create ratings matrix
-        ratings_matrix = self._create_ratings_matrix(df)
-        
-        # Calculate user and item biases
-        user_ratings_mean = np.nanmean(ratings_matrix, axis=1).reshape(-1, 1)
-        ratings_demeaned = ratings_matrix - user_ratings_mean
-        
-        # Perform SVD
-        U, sigma, Vt = svds(ratings_demeaned, k=n_factors)
-        
-        # Convert sigma to diagonal matrix
-        sigma_diag = np.diag(sigma)
-        
-        # Store the model components
-        self.model = {
-            'U': U,
-            'sigma': sigma_diag,
-            'Vt': Vt,
-            'user_ratings_mean': user_ratings_mean,
-            'global_average': self.global_average
-        }
-        
-        print("Model training complete")
-        return self
-    
-    def save_model(self, folder_path="models"):
-        """Save the trained model to disk"""
-        # Create models directory if it doesn't exist
-        os.makedirs(folder_path, exist_ok=True)
-        
-        # Save model components
-        model_data = {
-            'model': self.model,
-            'user_mapping': self.user_mapping,
-            'business_mapping': self.business_mapping,
-            'reverse_user_mapping': self.reverse_user_mapping,
-            'reverse_business_mapping': self.reverse_business_mapping,
-            'global_average': self.global_average
-        }
-        
-        model_path = os.path.join(folder_path, "yelp_recommender.pkl")
-        with open(model_path, 'wb') as f:
-            pickle.dump(model_data, f)
-            
-        print(f"Model saved to {model_path}")
-    
-    def load_model(self, folder_path="models"):
-        """Load a trained model from disk"""
-        model_path = os.path.join(folder_path, "yelp_recommender.pkl")
-        
-        with open(model_path, 'rb') as f:
-            model_data = pickle.load(f)
-            
-        self.model = model_data['model']
-        self.user_mapping = model_data['user_mapping']
-        self.business_mapping = model_data['business_mapping']
-        self.reverse_user_mapping = model_data['reverse_user_mapping']
-        self.reverse_business_mapping = model_data['reverse_business_mapping']
-        self.global_average = model_data['global_average']
-        
-        print(f"Model loaded from {model_path}")
-        return self
-    
-    def predict_rating(self, user_id, business_id):
-        """Predict rating for a specific user and business"""
-        if self.model is None:
-            raise ValueError("Model not trained yet. Call train() first.")
-            
-        if user_id not in self.user_mapping or business_id not in self.business_mapping:
-            # Return global average if user or business not in training data
-            return self.global_average
-            
-        user_idx = self.user_mapping[user_id]
-        business_idx = self.business_mapping[business_id]
-        
-        # Get model components
-        U = self.model['U']
-        sigma = self.model['sigma']
-        Vt = self.model['Vt']
-        user_ratings_mean = self.model['user_ratings_mean']
-        
-        # Predict rating
-        pred = user_ratings_mean[user_idx] + np.dot(np.dot(U[user_idx, :], sigma), Vt[:, business_idx])
-        
-        # Clip prediction to valid rating range (1-5)
-        return min(max(pred, 1.0), 5.0)
-    
-    def get_user_recommendations(self, user_id, top_n=10, filter_rated=True):
-        """Get top N recommendations for a user"""
-        if self.model is None:
-            raise ValueError("Model not trained yet. Call train() first.")
-            
-        if user_id not in self.user_mapping:
-            print(f"User {user_id} not found in training data.")
-            return pd.DataFrame()
-            
-        user_idx = self.user_mapping[user_id]
-        
-        # Get model components
-        U = self.model['U']
-        sigma = self.model['sigma']
-        Vt = self.model['Vt']
-        user_ratings_mean = self.model['user_ratings_mean']
-        
-        # Get predictions for all businesses
-        user_pred_ratings = user_ratings_mean[user_idx] + np.dot(np.dot(U[user_idx, :], sigma), Vt)
-        
-        # Convert to DataFrame
-        user_pred_df = pd.DataFrame({
-            'business_id': [self.reverse_business_mapping[i] for i in range(len(user_pred_ratings))],
-            'predicted_rating': user_pred_ratings
-        })
-        
-        # Filter out businesses the user has already rated if requested
-        if filter_rated:
-            with self.driver.session() as session:
-                query = """
-                MATCH (u:User {user_id: $user_id})-[:WROTE]->(:Review)-[:ABOUT]->(b:Business)
-                RETURN b.business_id AS business_id
-                """
-                result = session.run(query, user_id=user_id)
-                rated_businesses = [record['business_id'] for record in result]
-                user_pred_df = user_pred_df[~user_pred_df['business_id'].isin(rated_businesses)]
-        
-        # Sort by predicted rating and get top N
-        top_recommendations = user_pred_df.sort_values('predicted_rating', ascending=False).head(top_n)
-        
-        # Fetch additional information about the recommended businesses
-        business_info = self._fetch_business_info(top_recommendations['business_id'])
-        
-        # Merge with prediction data
-        recommendations = pd.merge(top_recommendations, business_info, on='business_id')
-        
-        return recommendations[['business_id', 'name', 'predicted_rating', 'avg_rating', 'review_count', 'city']]
-    
-    def get_similar_users(self, user_id, top_n=10):
-        """Find users similar to the given user based on latent factors"""
-        if self.model is None:
-            raise ValueError("Model not trained yet. Call train() first.")
-            
-        if user_id not in self.user_mapping:
-            print(f"User {user_id} not found in training data.")
-            return []
-            
-        user_idx = self.user_mapping[user_id]
-        
-        # Get user latent factors
-        user_factors = self.model['U'][user_idx, :]
-        
-        # Calculate cosine similarity with all other users
-        similarities = []
-        for idx, other_user_id in self.reverse_user_mapping.items():
-            if idx == user_idx:
-                continue
-                
-            other_factors = self.model['U'][idx, :]
-            similarity = np.dot(user_factors, other_factors) / (np.linalg.norm(user_factors) * np.linalg.norm(other_factors))
-            similarities.append((other_user_id, similarity))
-        
-        # Sort by similarity and return top N
-        return sorted(similarities, key=lambda x: x[1], reverse=True)[:top_n]
-    
-    def get_similar_businesses(self, business_id, top_n=10):
-        """Find businesses similar to the given business based on latent factors"""
-        if self.model is None:
-            raise ValueError("Model not trained yet. Call train() first.")
-            
-        if business_id not in self.business_mapping:
-            print(f"Business {business_id} not found in training data.")
-            return []
-            
-        business_idx = self.business_mapping[business_id]
-        
-        # Get business latent factors
-        business_factors = self.model['Vt'][:, business_idx]
-        
-        # Calculate cosine similarity with all other businesses
-        similarities = []
-        for idx, other_business_id in self.reverse_business_mapping.items():
-            if idx == business_idx:
-                continue
-                
-            other_factors = self.model['Vt'][:, idx]
-            similarity = np.dot(business_factors, other_factors) / (np.linalg.norm(business_factors) * np.linalg.norm(other_factors))
-            similarities.append((other_business_id, similarity))
-        
-        # Sort by similarity and return top N
-        top_similar = sorted(similarities, key=lambda x: x[1], reverse=True)[:top_n]
-        
-        # Get business information
-        business_ids = [item[0] for item in top_similar]
-        business_info = self._fetch_business_info(business_ids)
-        
-        # Add similarity scores
-        similarity_dict = {item[0]: item[1] for item in top_similar}
-        business_info['similarity'] = business_info['business_id'].map(similarity_dict)
-        
-        return business_info.sort_values('similarity', ascending=False)
-
-class RecommenderEvaluator:
-    def __init__(self, uri, user, password):
-        """Initialize the evaluator with Neo4j connection"""
-        self.driver = GraphDatabase.driver(uri, auth=(user, password))
-        self.recommender = None
-    
-    def close(self):
-        """Close the Neo4j connection"""
-        self.driver.close()
-        
-    def _fetch_review_data(self, limit=None):
-        """Fetch review data from Neo4j"""
+    def get_business_details(self, business_id):
+        """Get details about a specific business"""
         with self.driver.session() as session:
             query = """
+            MATCH (b:Business {business_id: $business_id})
+            OPTIONAL MATCH (b)-[:IN_CATEGORY]->(c:Category)
+            OPTIONAL MATCH (b)-[:LOCATED_IN]->(city:City)
+            RETURN b.business_id AS business_id,
+                   b.name AS name,
+                   b.stars AS avg_stars,
+                   b.review_count AS review_count,
+                   collect(DISTINCT c.name) AS categories,
+                   city.name AS city
+            """
+            result = session.run(query, business_id=business_id)
+            record = result.single()
+            return dict(record) if record else None
+    
+    def get_similar_users(self, user_id, min_common=2, limit=50):
+        """Find users with similar preferences based on review patterns"""
+        with self.driver.session() as session:
+            query = """
+            MATCH (u1:User {user_id: $user_id})-[:WROTE]->(:Review)-[:ABOUT]->(b:Business)
+            MATCH (u2:User)-[:WROTE]->(r2:Review)-[:ABOUT]->(b)
+            WHERE u1 <> u2
+            WITH u2, count(DISTINCT b) AS common_businesses
+            WHERE common_businesses >= $min_common
+            RETURN u2.user_id AS user_id, u2.name AS name, 
+                   u2.average_stars AS avg_stars, common_businesses
+            ORDER BY common_businesses DESC
+            LIMIT $limit
+            """
+            result = session.run(query, user_id=user_id, min_common=min_common, limit=limit)
+            return [dict(record) for record in result]
+    
+    def get_all_user_reviews(self, limit=None):
+        """Get all user reviews for building training and test sets"""
+        with self.driver.session() as session:
+            limit_clause = f"LIMIT {limit}" if limit else ""
+            query = f"""
             MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
             RETURN u.user_id AS user_id, b.business_id AS business_id, 
                    r.stars AS rating, r.date AS date
-            ORDER BY r.date
+            {limit_clause}
+            """
+            result = session.run(query)
+            return [dict(record) for record in result]
+    
+    def get_user_average_rating(self, user_id):
+        """Get the average rating for a user"""
+        with self.driver.session() as session:
+            query = """
+            MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)
+            RETURN avg(r.stars) AS avg_rating
+            """
+            result = session.run(query, user_id=user_id)
+            record = result.single()
+            return record["avg_rating"] if record and record["avg_rating"] is not None else 3.0
+
+    def get_business_average_rating(self, business_id):
+        """Get the average rating for a business"""
+        with self.driver.session() as session:
+            query = """
+            MATCH (r:Review)-[:ABOUT]->(b:Business {business_id: $business_id})
+            RETURN avg(r.stars) AS avg_rating
+            """
+            result = session.run(query, business_id=business_id)
+            record = result.single()
+            return record["avg_rating"] if record and record["avg_rating"] is not None else 3.0
+    
+    def get_rating(self, user_id, business_id):
+        """Get a specific rating from a user for a business"""
+        with self.driver.session() as session:
+            query = """
+            MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business {business_id: $business_id})
+            RETURN r.stars AS rating
+            """
+            result = session.run(query, user_id=user_id, business_id=business_id)
+            record = result.single()
+            return record["rating"] if record else None
+
+    def collaborative_filtering_recommendations(self, user_id, k=10, top_n=10):
+        """Get recommendations using user-based collaborative filtering"""
+        # Step 1: Get target user's reviews
+        user_reviews = self.get_user_ratings(user_id)
+        if not user_reviews:
+            return []
+        
+        # Create a dictionary of businesses the user has already reviewed
+        user_businesses = {r['business_id']: r['rating'] for r in user_reviews}
+        
+        # Step 2: Find similar users who have reviewed common businesses
+        similar_users = self.get_similar_users(user_id, min_common=1, limit=k*3)
+        
+        # Step 3: Get recommendations from similar users
+        recommendations = defaultdict(lambda: {'sum_sim': 0, 'weighted_sum': 0})
+        
+        with self.driver.session() as session:
+            for sim_user in similar_users:
+                sim_user_id = sim_user['user_id']
+                
+                # Get the review overlap to calculate similarity
+                query = """
+                MATCH (u1:User {user_id: $user_id})-[:WROTE]->(r1:Review)-[:ABOUT]->(b:Business)
+                MATCH (u2:User {user_id: $sim_user_id})-[:WROTE]->(r2:Review)-[:ABOUT]->(b)
+                RETURN b.business_id AS business_id, r1.stars AS u1_rating, r2.stars AS u2_rating
+                """
+                result = session.run(query, user_id=user_id, sim_user_id=sim_user_id)
+                
+                common_ratings = [(r['business_id'], r['u1_rating'], r['u2_rating']) for r in result]
+                
+                if not common_ratings:
+                    continue
+                
+                # Calculate Pearson similarity
+                u1_ratings = [r[1] for r in common_ratings]
+                u2_ratings = [r[2] for r in common_ratings]
+                
+                if len(u1_ratings) < 2:
+                    continue
+                
+                try:
+                    u1_mean = sum(u1_ratings) / len(u1_ratings)
+                    u2_mean = sum(u2_ratings) / len(u2_ratings)
+                    
+                    numerator = sum((r1 - u1_mean) * (r2 - u2_mean) for r1, r2 in zip(u1_ratings, u2_ratings))
+                    denominator1 = sqrt(sum((r1 - u1_mean) ** 2 for r1 in u1_ratings))
+                    denominator2 = sqrt(sum((r2 - u2_mean) ** 2 for r2 in u2_ratings))
+                    
+                    # Avoid division by zero
+                    if denominator1 == 0 or denominator2 == 0:
+                        similarity = 0
+                    else:
+                        similarity = numerator / (denominator1 * denominator2)
+                    
+                    # Adjust for negative correlations and low similarity
+                    if similarity <= 0:
+                        continue
+                        
+                    # Get businesses that similar user has rated but target user hasn't
+                    query = """
+                    MATCH (u:User {user_id: $sim_user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
+                    WHERE NOT EXISTS {
+                        MATCH (u2:User {user_id: $user_id})-[:WROTE]->(:Review)-[:ABOUT]->(b)
+                    }
+                    RETURN b.business_id AS business_id, r.stars AS rating
+                    """
+                    result = session.run(query, user_id=user_id, sim_user_id=sim_user_id)
+                    
+                    # Add weighted ratings to recommendations
+                    for record in result:
+                        business_id = record['business_id']
+                        rating = record['rating']
+                        
+                        recommendations[business_id]['sum_sim'] += similarity
+                        recommendations[business_id]['weighted_sum'] += similarity * rating
+                    
+                except Exception as e:
+                    print(f"Error calculating similarity: {e}")
+                    continue
+        
+        # Calculate predicted ratings and create recommendation list
+        recommendation_list = []
+        for business_id, values in recommendations.items():
+            if values['sum_sim'] > 0:
+                predicted_rating = values['weighted_sum'] / values['sum_sim']
+                
+                # Get business details
+                business_details = self.get_business_details(business_id)
+                if business_details:
+                    business_details['predicted_rating'] = predicted_rating
+                    recommendation_list.append(business_details)
+        
+        # Sort by predicted rating and return top N
+        recommendation_list.sort(key=lambda x: x['predicted_rating'], reverse=True)
+        return recommendation_list[:top_n]
+    
+    def content_based_recommendations(self, user_id, top_n=10):
+        """Get recommendations based on business categories and user preferences"""
+        with self.driver.session() as session:
+            # Get user's category preferences
+            query = """
+            MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)-[:IN_CATEGORY]->(c:Category)
+            WITH u, c, avg(r.stars) AS avg_rating
+            WHERE avg_rating >= 3.5  // Focus on categories the user likes
+            RETURN c.name AS category, avg_rating, count(*) AS frequency
+            ORDER BY avg_rating DESC, frequency DESC
+            """
+            result = session.run(query, user_id=user_id)
+            preferred_categories = [record['category'] for record in result]
+            
+            if not preferred_categories:
+                return []
+            
+            # Find businesses in preferred categories that the user hasn't reviewed
+            top_categories = preferred_categories[:min(5, len(preferred_categories))]
+            category_params = {f"category{i}": category for i, category in enumerate(top_categories)}
+            
+            category_conditions = " OR ".join([f"c.name = $category{i}" for i in range(len(top_categories))])
+            
+            query = f"""
+            MATCH (b:Business)-[:IN_CATEGORY]->(c:Category)
+            WHERE {category_conditions}
+            AND NOT EXISTS {{
+                MATCH (u:User {{user_id: $user_id}})-[:WROTE]->(:Review)-[:ABOUT]->(b)
+            }}
+            WITH b, collect(c.name) AS categories, b.stars AS avg_rating, b.review_count AS review_count
+            RETURN b.business_id AS business_id, b.name AS name, categories, avg_rating, review_count
+            ORDER BY avg_rating DESC, review_count DESC
+            LIMIT $limit
             """
             
-            if limit:
-                query += f" LIMIT {limit}"
+            params = {
+                "user_id": user_id,
+                "limit": top_n * 3
+            }
+            params.update(category_params)
+            
+            result = session.run(query, **params)
+            recommendations = []
+            
+            for record in result:
+                business = dict(record)
                 
+                # Calculate a score based on category match and ratings
+                category_match_score = sum(1 for cat in business['categories'] if cat in preferred_categories)
+                business['score'] = (category_match_score * 0.7) + (business['avg_rating'] * 0.3)
+                
+                recommendations.append(business)
+            
+            # Sort by score and return top N
+            recommendations.sort(key=lambda x: x['score'], reverse=True)
+            return recommendations[:top_n]
+    
+    def hybrid_recommendations(self, user_id, top_n=10):
+        """Combine collaborative filtering and content-based recommendations"""
+        cf_recs = self.collaborative_filtering_recommendations(user_id, top_n=top_n)
+        cb_recs = self.content_based_recommendations(user_id, top_n=top_n)
+        
+        # Create a map of business_id to recommendation
+        all_recs = {}
+        
+        # Add collaborative filtering recommendations with weight
+        for rec in cf_recs:
+            all_recs[rec['business_id']] = {
+                'business_id': rec['business_id'],
+                'name': rec['name'],
+                'cf_score': rec['predicted_rating'],
+                'cb_score': 0,
+                'categories': rec['categories'],
+                'city': rec['city'],
+                'avg_stars': rec['avg_stars']
+            }
+        
+        # Add content-based recommendations with weight
+        for rec in cb_recs:
+            if rec['business_id'] in all_recs:
+                all_recs[rec['business_id']]['cb_score'] = rec['score']
+            else:
+                all_recs[rec['business_id']] = {
+                    'business_id': rec['business_id'],
+                    'name': rec['name'],
+                    'cf_score': 0,
+                    'cb_score': rec['score'],
+                    'categories': rec['categories'],
+                    'city': None,  # Content-based query might not include city
+                    'avg_stars': rec['avg_rating']
+                }
+        
+        # Calculate hybrid score and create final list
+        hybrid_recs = []
+        for business_id, rec in all_recs.items():
+            # Normalize scores (assuming 5-star rating system)
+            norm_cf = rec['cf_score'] / 5.0 if rec['cf_score'] > 0 else 0
+            norm_cb = rec['cb_score'] / (1.0 + 5.0) if rec['cb_score'] > 0 else 0  # Normalize based on max possible score
+            
+            # Calculate hybrid score with weights
+            hybrid_score = (norm_cf * 0.6) + (norm_cb * 0.4)
+            
+            rec['hybrid_score'] = hybrid_score
+            rec['predicted_rating'] = hybrid_score * 5  # Scale back to 5-star rating
+            hybrid_recs.append(rec)
+        
+        # Sort by hybrid score and return top N
+        hybrid_recs.sort(key=lambda x: x['hybrid_score'], reverse=True)
+        return hybrid_recs[:top_n]
+    
+    def baseline_predict(self, user_id, business_id):
+        """Baseline prediction model using global, user, and item biases"""
+        # Get global average rating
+        with self.driver.session() as session:
+            query = """
+            MATCH ()-[:WROTE]->(r:Review)
+            RETURN avg(r.stars) AS global_avg
+            """
             result = session.run(query)
-            records = [record for record in result]
-            if not records:
-                print("Warning: No records returned from Neo4j query")
-                return pd.DataFrame(columns=['user_id', 'business_id', 'rating', 'date'])
-            
-            df = pd.DataFrame(records)
-            
-            # Debug: print column names
-            print(f"Columns in returned DataFrame: {df.columns.tolist()}")
-            return pd.DataFrame(records)
+            record = result.single()
+            global_avg = record["global_avg"] if record else 3.0
+        
+        # Get user bias (difference from global average)
+        user_avg = self.get_user_average_rating(user_id)
+        user_bias = user_avg - global_avg
+        
+        # Get business bias (difference from global average)
+        business_avg = self.get_business_average_rating(business_id)
+        business_bias = business_avg - global_avg
+        
+        # Predict rating: global average + user bias + business bias
+        predicted_rating = global_avg + user_bias + business_bias
+        
+        # Clip to valid rating range [1, 5]
+        return max(1.0, min(5.0, predicted_rating))
     
-    def train_test_split_by_time(self, data=None, test_size=0.2, date_column='date'):
-        """Split data into train and test sets based on time"""
-        if data is None:
-            data = self._fetch_review_data()
-            
-        # Convert date string to datetime if needed
-        if isinstance(data[date_column].iloc[0], str):
-            data[date_column] = pd.to_datetime(data[date_column])
-            
-        # Sort by date
-        data = data.sort_values(by=date_column)
-        
-        # Determine split point
-        split_idx = int(len(data) * (1 - test_size))
-        
-        # Split data
-        train_data = data.iloc[:split_idx]
-        test_data = data.iloc[split_idx:]
-        
-        return train_data, test_data
+    def matrix_factorization_predict(self, user_id, business_id, user_factors, business_factors):
+        """Predict rating using pre-computed matrix factorization factors"""
+        if user_id in user_factors and business_id in business_factors:
+            # Dot product of user and business factors
+            prediction = np.dot(user_factors[user_id], business_factors[business_id])
+            # Clip to valid rating range
+            return max(1.0, min(5.0, prediction))
+        else:
+            # Fall back to baseline predictor if factors not available
+            return self.baseline_predict(user_id, business_id)
     
-    def evaluate_model(self, recommender, test_data, k_values=[5, 10, 20]):
-        """Evaluate the recommender model using various metrics"""
-        self.recommender = recommender
+    def train_matrix_factorization(self, num_factors=20, learning_rate=0.005, regularization=0.02, num_iterations=50, sample_size=50000):
+        """Train a matrix factorization model and return user and business factors"""
+        print("Training matrix factorization model...")
         
-        # Calculate prediction metrics
-        print("Calculating prediction metrics...")
-        true_ratings = []
-        predicted_ratings = []
+        # Get sample of reviews for training
+        reviews = self.get_all_user_reviews(limit=sample_size)
+        if not reviews:
+            print("No reviews found for training.")
+            return {}, {}
         
-        # Predict ratings for test data
-        for _, row in test_data.iterrows():
-            user_id = row['user_id']
-            business_id = row['business_id']
-            true_rating = row['rating']
+        # Create user and business dictionaries
+        users = set(review['user_id'] for review in reviews)
+        businesses = set(review['business_id'] for review in reviews)
+        
+        # Create index mappings
+        user_to_idx = {user_id: i for i, user_id in enumerate(users)}
+        business_to_idx = {business_id: i for i, business_id in enumerate(businesses)}
+        
+        # Initialize factor matrices
+        num_users = len(users)
+        num_businesses = len(businesses)
+        
+        # Initialize with small random values
+        np.random.seed(42)
+        user_factors = np.random.normal(0, 0.1, (num_users, num_factors))
+        business_factors = np.random.normal(0, 0.1, (num_businesses, num_factors))
+        
+        # Calculate global average rating
+        global_avg = sum(review['rating'] for review in reviews) / len(reviews)
+        
+        # Calculate user and business biases
+        user_biases = np.zeros(num_users)
+        business_biases = np.zeros(num_businesses)
+        
+        user_counts = defaultdict(int)
+        business_counts = defaultdict(int)
+        
+        for review in reviews:
+            user_idx = user_to_idx[review['user_id']]
+            business_idx = business_to_idx[review['business_id']]
+            user_biases[user_idx] += review['rating'] - global_avg
+            business_biases[business_idx] += review['rating'] - global_avg
+            user_counts[user_idx] += 1
+            business_counts[business_idx] += 1
+        
+        for user_idx in range(num_users):
+            count = user_counts[user_idx]
+            if count > 0:
+                user_biases[user_idx] /= count
+        
+        for business_idx in range(num_businesses):
+            count = business_counts[business_idx]
+            if count > 0:
+                business_biases[business_idx] /= count
+        
+        # Train using SGD
+        for iteration in range(num_iterations):
+            # Shuffle reviews for stochastic updates
+            np.random.shuffle(reviews)
             
-            # Skip if user or business not in training data
-            if user_id not in recommender.user_mapping or business_id not in recommender.business_mapping:
-                continue
+            total_error = 0
+            
+            for review in reviews:
+                user_idx = user_to_idx[review['user_id']]
+                business_idx = business_to_idx[review['business_id']]
                 
-            predicted_rating = recommender.predict_rating(user_id, business_id)
+                # Predict current rating
+                predicted = global_avg + user_biases[user_idx] + business_biases[business_idx] + \
+                           np.dot(user_factors[user_idx], business_factors[business_idx])
+                
+                # Calculate error
+                error = review['rating'] - predicted
+                total_error += error ** 2
+                
+                # Update biases
+                user_biases[user_idx] += learning_rate * (error - regularization * user_biases[user_idx])
+                business_biases[business_idx] += learning_rate * (error - regularization * business_biases[business_idx])
+                
+                # Update factors
+                user_factors_grad = error * business_factors[business_idx] - regularization * user_factors[user_idx]
+                business_factors_grad = error * user_factors[user_idx] - regularization * business_factors[business_idx]
+                
+                user_factors[user_idx] += learning_rate * user_factors_grad
+                business_factors[business_idx] += learning_rate * business_factors_grad
             
-            true_ratings.append(true_rating)
-            predicted_ratings.append(predicted_rating)
+            rmse = sqrt(total_error / len(reviews))
+            if iteration % 10 == 0:
+                print(f"Iteration {iteration}, RMSE: {rmse:.4f}")
         
-        # Ensure we have predictions to evaluate
-        if len(true_ratings) == 0:
-            print("No predictions available for evaluation")
+        # Create dictionaries to map user_id and business_id to factors
+        user_factors_dict = {user_id: user_factors[user_to_idx[user_id]] for user_id in users}
+        business_factors_dict = {business_id: business_factors[business_to_idx[business_id]] for business_id in businesses}
+        
+        # Include biases in factors
+        for user_id in users:
+            user_idx = user_to_idx[user_id]
+            user_factors_dict[user_id] = np.append(user_factors_dict[user_id], [user_biases[user_idx]])
+        
+        for business_id in businesses:
+            business_idx = business_to_idx[business_id]
+            business_factors_dict[business_id] = np.append(business_factors_dict[business_id], [business_biases[business_idx]])
+        
+        print("Matrix factorization training complete.")
+        return user_factors_dict, business_factors_dict, global_avg
+
+    def evaluate_recommendations(self, test_set, user_factors={}, business_factors={}, global_avg=3.0):
+        """Evaluate recommendation algorithms using various metrics"""
+        if not test_set:
+            print("No test data available for evaluation.")
             return {}
-            
-        # Calculate error metrics
-        mae = mean_absolute_error(true_ratings, predicted_ratings)
-        rmse = np.sqrt(mean_squared_error(true_ratings, predicted_ratings))
-        r2 = r2_score(true_ratings, predicted_ratings)
         
-        # Calculate average difference to ensure RMSE isn't zero or infinite
-        avg_diff = np.mean(np.abs(np.array(true_ratings) - np.array(predicted_ratings)))
-        
-        print(f"MAE: {mae:.4f}")
-        print(f"RMSE: {rmse:.4f}")
-        print(f"R²: {r2:.4f}")
-        print(f"Average difference: {avg_diff:.4f}")
-        
-        # Plot actual vs predicted ratings
-        plt.figure(figsize=(10, 6))
-        plt.scatter(true_ratings, predicted_ratings, alpha=0.5)
-        plt.plot([1, 5], [1, 5], 'r--')
-        plt.xlabel('Actual Ratings')
-        plt.ylabel('Predicted Ratings')
-        plt.title('Actual vs Predicted Ratings')
-        plt.axis('equal')
-        plt.axis([1, 5, 1, 5])
-        plt.savefig("models/ratings_comparison.png")
-        plt.close()
-        
-        # Return metrics
+        # Initialize metrics
         metrics = {
-            'mae': mae,
-            'rmse': rmse,
-            'r2': r2,
-            'avg_diff': avg_diff,
-            'num_predictions': len(true_ratings)
+            'baseline': {'mae': 0, 'rmse': 0, 'count': 0},
+            'matrix_factorization': {'mae': 0, 'rmse': 0, 'count': 0}
         }
         
-        return metrics
-    
-    def cross_validate(self, n_factors_list=[10, 20, 50, 100], limit=None):
-        """Perform cross-validation to find optimal number of factors"""
-        print("Performing cross-validation...")
-        
-        # Fetch data
-        data = self._fetch_review_data(limit=limit)
-        
-        # Split data into train and test sets
-        train_data, test_data = self.train_test_split_by_time(data)
-        
-        # Initialize results dictionary
-        results = {}
-        
-        # Test different numbers of factors
-        for n_factors in n_factors_list:
-            print(f"\nTraining model with {n_factors} factors...")
+        # Calculate metrics
+        for record in test_set:
+            user_id = record['user_id']
+            business_id = record['business_id']
+            actual_rating = record['rating']
             
-            # Create and train recommender
-            recommender = YelpRecommender(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
+            # Baseline prediction
+            baseline_pred = self.baseline_predict(user_id, business_id)
+            baseline_error = abs(actual_rating - baseline_pred)
+            metrics['baseline']['mae'] += baseline_error
+            metrics['baseline']['rmse'] += baseline_error ** 2
+            metrics['baseline']['count'] += 1
             
-            # Create mappings and train model
-            recommender._create_mappings(train_data)
-            
-            # Create ratings matrix
-            ratings_matrix = np.zeros((len(recommender.user_mapping), len(recommender.business_mapping)))
-            
-            # Fill matrix with ratings
-            for _, row in train_data.iterrows():
-                user_id = row['user_id']
-                business_id = row['business_id']
+            # Matrix factorization prediction
+            if user_factors and business_factors and user_id in user_factors and business_id in business_factors:
+                user_vector = user_factors[user_id]
+                business_vector = business_factors[business_id]
                 
-                if user_id in recommender.user_mapping and business_id in recommender.business_mapping:
-                    user_idx = recommender.user_mapping[user_id]
-                    business_idx = recommender.business_mapping[business_id]
-                    ratings_matrix[user_idx, business_idx] = row['rating']
-            
-            # Calculate global average
-            recommender.global_average = train_data['rating'].mean()
-            
-            # Calculate user means
-            user_ratings_mean = np.nanmean(ratings_matrix, axis=1).reshape(-1, 1)
-            ratings_demeaned = ratings_matrix - user_ratings_mean
-            
-            # Perform SVD
-            U, sigma, Vt = svds(ratings_demeaned, k=n_factors)
-            sigma_diag = np.diag(sigma)
-            
-            # Store model
-            recommender.model = {
-                'U': U,
-                'sigma': sigma_diag,
-                'Vt': Vt,
-                'user_ratings_mean': user_ratings_mean,
-                'global_average': recommender.global_average
-            }
-            
-            # Evaluate model
-            metrics = self.evaluate_model(recommender, test_data)
-            results[n_factors] = metrics
-            
-            # Close connection
-            recommender.close()
+                # Extract bias terms (last element of vectors)
+                user_bias = user_vector[-1]
+                business_bias = business_vector[-1]
+                
+                # Dot product of feature vectors
+                dot_product = np.dot(user_vector[:-1], business_vector[:-1])
+                
+                # Final prediction
+                mf_pred = global_avg + user_bias + business_bias + dot_product
+                mf_pred = max(1.0, min(5.0, mf_pred))  # Clip to valid range
+                
+                mf_error = abs(actual_rating - mf_pred)
+                metrics['matrix_factorization']['mae'] += mf_error
+                metrics['matrix_factorization']['rmse'] += mf_error ** 2
+                metrics['matrix_factorization']['count'] += 1
         
-        # Plot results
-        plt.figure(figsize=(12, 6))
+        # Calculate final metrics
+        for model in metrics:
+            count = metrics[model]['count']
+            if count > 0:
+                metrics[model]['mae'] /= count
+                metrics[model]['rmse'] = sqrt(metrics[model]['rmse'] / count)
+                print(f"{model.capitalize()} - MAE: {metrics[model]['mae']:.4f}, RMSE: {metrics[model]['rmse']:.4f}")
+            else:
+                print(f"No valid predictions for {model} model.")
         
-        # Plot RMSE
-        plt.subplot(1, 2, 1)
-        plt.plot(list(results.keys()), [results[k]['rmse'] for k in results.keys()], 'o-')
-        plt.title('RMSE vs Number of Factors')
-        plt.xlabel('Number of Factors')
-        plt.ylabel('RMSE')
-        plt.grid(True)
-        
-        # Plot MAE
-        plt.subplot(1, 2, 2)
-        plt.plot(list(results.keys()), [results[k]['mae'] for k in results.keys()], 'o-')
-        plt.title('MAE vs Number of Factors')
-        plt.xlabel('Number of Factors')
-        plt.ylabel('MAE')
-        plt.grid(True)
-        
-        plt.tight_layout()
-        plt.savefig("models/cross_validation_results.png")
-        plt.close()
-        
-        # Find best number of factors
-        best_n_factors = min(results.keys(), key=lambda k: results[k]['rmse'])
-        print(f"\nBest number of factors: {best_n_factors} (RMSE: {results[best_n_factors]['rmse']:.4f})")
-        
-        return results, best_n_factors
+        return metrics
 
-# Sample usage
-def sample_usage():
-    """Demonstrate usage of the recommender system"""
-    # Connect to Neo4j
-    recommender = YelpRecommender(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
-    
-    # Train model (limit to 10000 reviews for faster execution)
-    recommender.train(n_factors=50, limit=10000)
-    
-    # Save model
-    recommender.save_model()
-    
-    # Get recommendations for a random user
-    with recommender.driver.session() as session:
-        # Get a random user ID
-        query = "MATCH (u:User) RETURN u.user_id AS user_id LIMIT 1"
-        result = session.run(query)
-        user_id = result.single()['user_id']
-    
-    print(f"\nGetting recommendations for user {user_id}:")
-    recommendations = recommender.get_user_recommendations(user_id, top_n=5)
-    print(recommendations)
-    
-    # Get a random business for similarity search
-    with recommender.driver.session() as session:
-        query = "MATCH (b:Business) RETURN b.business_id AS business_id, b.name AS name LIMIT 1"
-        result = session.run(query)
-        record = result.single()
-        business_id = record['business_id']
-        business_name = record['name']
-    
-    print(f"\nFinding businesses similar to {business_name} ({business_id}):")
-    similar_businesses = recommender.get_similar_businesses(business_id, top_n=5)
-    print(similar_businesses[['name', 'city', 'similarity']])
-    
-    # Perform evaluation
-    evaluator = RecommenderEvaluator(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
-    
-    # Fetch data for evaluation
-    data = evaluator._fetch_review_data(limit=20000)
-    train_data, test_data = evaluator.train_test_split_by_time(data)
-    
-    print(f"\nTraining data size: {len(train_data)}")
-    print(f"Test data size: {len(test_data)}")
-    
-    # Create a new recommender for training
-    eval_recommender = YelpRecommender(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
-    
-    # Create mappings and train model on training data
-    eval_recommender._create_mappings(train_data)
-    
-    # Create ratings matrix
-    ratings_matrix = np.zeros((len(eval_recommender.user_mapping), len(eval_recommender.business_mapping)))
-    
-    # Fill matrix with ratings
-    for _, row in train_data.iterrows():
-        user_id = row['user_id']
-        business_id = row['business_id']
+    def split_train_test(self, test_size=0.2, min_reviews=5, sample_size=100000):
+        """Split data into training and test sets"""
+        print("Splitting data into training and test sets...")
         
-        if user_id in eval_recommender.user_mapping and business_id in eval_recommender.business_mapping:
-            user_idx = eval_recommender.user_mapping[user_id]
-            business_idx = eval_recommender.business_mapping[business_id]
-            ratings_matrix[user_idx, business_idx] = row['rating']
-    
-    # Calculate global average
-    eval_recommender.global_average = train_data['rating'].mean()
-    
-    # Calculate user means
-    user_ratings_mean = np.nanmean(ratings_matrix, axis=1).reshape(-1, 1)
-    ratings_demeaned = ratings_matrix - user_ratings_mean
-    
-    # Perform SVD
-    n_factors = 50
-    U, sigma, Vt = svds(ratings_demeaned, k=n_factors)
-    sigma_diag = np.diag(sigma)
-    
-    # Store model
-    eval_recommender.model = {
-        'U': U,
-        'sigma': sigma_diag,
-        'Vt': Vt,
-        'user_ratings_mean': user_ratings_mean,
-        'global_average': eval_recommender.global_average
-    }
-    
-    # Evaluate model
-    print("\nEvaluating model on test data:")
-    metrics = evaluator.evaluate_model(eval_recommender, test_data)
-    
-    # Clean up
-    recommender.close()
-    eval_recommender.close()
-    evaluator.close()
-    
-    return metrics
+        # Get all reviews
+        all_reviews = self.get_all_user_reviews(limit=sample_size)
+        if not all_reviews:
+            print("No reviews found.")
+            return [], []
+        
+        # Create a dataframe for easier manipulation
+        df = pd.DataFrame(all_reviews)
+        
+        # Convert date strings to datetime objects for sorting
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Get users with minimum number of reviews
+        user_counts = df['user_id'].value_counts()
+        valid_users = user_counts[user_counts >= min_reviews].index.tolist()
+        
+        # Filter reviews for valid users
+        df_valid = df[df['user_id'].isin(valid_users)]
+        
+        # Sort by date for each user
+        df_valid = df_valid.sort_values(['user_id', 'date'])
+        
+        # Group by user_id
+        grouped = df_valid.groupby('user_id')
+        
+        train_set = []
+        test_set = []
+        
+        # For each user, take the most recent reviews as test set
+        for user_id, group in grouped:
+            n_reviews = len(group)
+            n_test = max(1, int(n_reviews * test_size))
+            
+            user_train = group.iloc[:-n_test].to_dict('records')
+            user_test = group.iloc[-n_test:].to_dict('records')
+            
+            train_set.extend(user_train)
+            test_set.extend(user_test)
+        
+        print(f"Train set: {len(train_set)} reviews, Test set: {len(test_set)} reviews")
+        return train_set, test_set
 
-# Run cross-validation to find optimal parameters
-def run_cross_validation():
-    """Run cross-validation to find optimal model parameters"""
-    evaluator = RecommenderEvaluator(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
+
+def main():
+    # Create the recommendation system
+    recommender = YelpRecommendationSystem(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
     
-    # Run cross-validation with different numbers of factors
-    results, best_n_factors = evaluator.cross_validate(
-        n_factors_list=[10, 20, 30, 50, 70, 100],
-        limit=50000  # Limit data for faster execution
-    )
-    
-    # Train final model with best number of factors
-    print(f"\nTraining final model with {best_n_factors} factors...")
-    recommender = YelpRecommender(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
-    recommender.train(n_factors=best_n_factors)
-    
-    # Save final model
-    recommender.save_model()
-    
-    # Clean up
-    recommender.close()
-    evaluator.close()
-    
-    return best_n_factors, results
+    try:
+        # Split data into training and test sets
+        train_set, test_set = recommender.split_train_test(test_size=0.2, min_reviews=3, sample_size=50000)
+        
+        if not train_set or not test_set:
+            print("Insufficient data for evaluation.")
+            return
+        
+        # Train matrix factorization model
+        user_factors, business_factors, global_avg = recommender.train_matrix_factorization(
+            num_factors=15,
+            learning_rate=0.005,
+            regularization=0.02,
+            num_iterations=20,
+            sample_size=len(train_set)
+        )
+        
+        # Evaluate recommendation algorithms
+        print("\nEvaluating recommendation algorithms...")
+        metrics = recommender.evaluate_recommendations(test_set, user_factors, business_factors, global_avg)
+        
+        # Example: Get recommendations for a specific user
+        example_user_id = test_set[0]['user_id']  # Get a user from test set
+        print(f"\nExample recommendations for user {example_user_id}:")
+        
+        # Get collaborative filtering recommendations
+        print("\nCollaborative Filtering Recommendations:")
+        cf_recs = recommender.collaborative_filtering_recommendations(example_user_id, top_n=5)
+        for i, rec in enumerate(cf_recs):
+            print(f"{i+1}. {rec['name']} - Predicted Rating: {rec['predicted_rating']:.2f} - Categories: {', '.join(rec['categories'][:3])}")
+        
+        # Get content-based recommendations
+        print("\nContent-Based Recommendations:")
+        cb_recs = recommender.content_based_recommendations(example_user_id, top_n=5)
+        for i, rec in enumerate(cb_recs):
+            print(f"{i+1}. {rec['name']} - Score: {rec['score']:.2f} - Categories: {', '.join(rec['categories'][:3])}")
+        
+        # Get hybrid recommendations
+        print("\nHybrid Recommendations:")
+        hybrid_recs = recommender.hybrid_recommendations(example_user_id, top_n=5)
+        for i, rec in enumerate(hybrid_recs):
+            print(f"{i+1}. {rec['name']} - Predicted Rating: {rec['predicted_rating']:.2f} - Categories: {', '.join(rec['categories'][:3])}")
+        
+    finally:
+        recommender.close()
 
 if __name__ == "__main__":
-    # Create models directory
-    os.makedirs("models", exist_ok=True)
+    main()
     
-    # Run sample usage
-    print("Running sample usage...")
-    metrics = sample_usage()
-    
-    # Optionally run cross-validation (uncomment to run)
-    # print("\nRunning cross-validation...")
-    # best_n_factors, cv_results = run_cross_validation()
