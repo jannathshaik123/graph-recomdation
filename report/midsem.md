@@ -1,9 +1,9 @@
-
 <div align="center">
 
 # Improve Recommender Systems using Knowledge Graphs
 
 ## Report
+
 ### CS F377 DESIGN PROJECT
 
 By
@@ -44,7 +44,7 @@ ID No.: 2021A7PS0132U
 
 This is to certify that the Semester Project Report entitled, **Improve Recommender Systems using Knowledge Graphs** and submitted by Jannath Shaik ID No. 2021A7PS0132U in complete fulfillment of the requirement CS F491 SPECIAL PROJECT embodies the work done by her under my supervision.
 
-Date: 15/04/2025                                                      Signature of the Supervisor  
+Date: 15/04/2025 Signature of the Supervisor  
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Name: Dr Sujala D. Shetty  
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Designation: Assoc. Professor (CS)
 
@@ -70,7 +70,7 @@ Date: 15/04/2025                                                      Signature 
 This project develops a comprehensive recommendation system for Yelp business reviews, implementing two primary recommendation strategies: collaborative filtering and graph-based recommendations. The collaborative filtering approach utilizes matrix factorization techniques to identify latent factors affecting user preferences, while the graph-based system leverages Neo4j to represent and query complex relationships between users, businesses, and attributes. The implementation features a user-friendly Streamlit interface allowing users to explore recommendations, compare different recommendation strategies, and visualize user-business relationships. The system architecture demonstrates scalability while maintaining reasonable response times, making it suitable for real-world applications. Both approaches offer complementary strengths, with collaborative filtering excelling in prediction accuracy for users with sufficient history, while graph-based methods provide contextual recommendations and better address the cold-start problem.
 
 **Signature of Student:** Jannath Shaik  
-**Date:** 15/04/2025  
+**Date:** 15/04/2025
 
 **Signature of Supervisor:**  
 **Date:** 15/04/2025
@@ -82,38 +82,38 @@ This project develops a comprehensive recommendation system for Yelp business re
 [ACKNOWLEDGEMENTS](#acknowledgements)  
 [CERTIFICATE](#certificate)  
 [ABSTRACT](#bits-pilani-dubai-campus)  
-[TABLE OF CONTENTS](#table-of-contents)  
+[TABLE OF CONTENTS](#table-of-contents)
 
 [**Chapter 1: Introduction**](#chapter-1-introduction)  
 &nbsp;&nbsp;&nbsp;&nbsp;[1.1 Background and Significance](#11-background-and-significance)  
 &nbsp;&nbsp;&nbsp;&nbsp;[1.2 Motivation](#12-motivation)  
-&nbsp;&nbsp;&nbsp;&nbsp;[1.3 Challenges](#13-challenges)  
+&nbsp;&nbsp;&nbsp;&nbsp;[1.3 Challenges](#13-challenges)
 
 [**Chapter 2: Literature Review**](#chapter-2-literature-review)  
 &nbsp;&nbsp;&nbsp;&nbsp;[2.1 Evolution of Recommendation Systems](#21-evolution-of-recommendation-systems)  
 &nbsp;&nbsp;&nbsp;&nbsp;[2.2 Collaborative Filtering Approaches](#22-collaborative-filtering-approaches)  
 &nbsp;&nbsp;&nbsp;&nbsp;[2.3 Content-Based Filtering](#23-content-based-filtering)  
 &nbsp;&nbsp;&nbsp;&nbsp;[2.4 Graph-Based Recommendation](#24-graph-based-recommendation)  
-&nbsp;&nbsp;&nbsp;&nbsp;[2.5 Deep Learning in Recommendation](#25-deep-learning-in-recommendation)  
+&nbsp;&nbsp;&nbsp;&nbsp;[2.5 Deep Learning in Recommendation](#25-deep-learning-in-recommendation)
 
 [**Chapter 3: Dataset Description**](#chapter-3-dataset-description)  
 &nbsp;&nbsp;&nbsp;&nbsp;[3.1 Dataset Overview](#31-dataset-overview)  
 &nbsp;&nbsp;&nbsp;&nbsp;[3.2 Data Files and Structure](#32-data-files-and-structure)  
 &nbsp;&nbsp;&nbsp;&nbsp;[3.3 Dataset Statistics](#33-dataset-statistics)  
 &nbsp;&nbsp;&nbsp;&nbsp;[3.4 Data Characteristics](#34-data-characteristics)  
-&nbsp;&nbsp;&nbsp;&nbsp;[3.5 Data Preprocessing](#35-data-preprocessing)  
+&nbsp;&nbsp;&nbsp;&nbsp;[3.5 Data Preprocessing](#35-data-preprocessing)
 
 [**Chapter 4: Methodology**](#chapter-4-methodology)  
 &nbsp;&nbsp;&nbsp;&nbsp;[4.1 System Architecture Overview](#41-system-architecture-overview)  
 &nbsp;&nbsp;&nbsp;&nbsp;[4.2 Data Processing Layer](#42-data-processing-layer)  
 &nbsp;&nbsp;&nbsp;&nbsp;[4.3 Database Storage Layer](#43-database-storage-layer)  
 &nbsp;&nbsp;&nbsp;&nbsp;[4.4 Recommendation Engines](#44-recommendation-engines)  
-&nbsp;&nbsp;&nbsp;&nbsp;[4.5 User Interface Layer](#45-user-interface-layer)  
+&nbsp;&nbsp;&nbsp;&nbsp;[4.5 User Interface Layer](#45-user-interface-layer)
 
 [**Chapter 5: Implementation Details**](#chapter-5-implementation-details)  
 &nbsp;&nbsp;&nbsp;&nbsp;[5.1 Experimental Setup](#51-experimental-setup)  
 &nbsp;&nbsp;&nbsp;&nbsp;[5.2 Evaluation Metrics](#52-evaluation-metrics)  
-&nbsp;&nbsp;&nbsp;&nbsp;[5.3 Experiments Planned](#53-experiments-planned)  
+&nbsp;&nbsp;&nbsp;&nbsp;[5.3 Experiments Planned](#53-experiments-planned)
 
 [**REFERENCES**](#references)
 
@@ -205,7 +205,7 @@ The dataset is organized into the following files:
 ```
 yelp_training_set/
   ├── yelp_training_set_business.json
-  ├── yelp_training_set_review.json 
+  ├── yelp_training_set_review.json
   ├── yelp_training_set_user.json
   └── yelp_training_set_checkin.json
 ```
@@ -222,20 +222,25 @@ Based on the preprocessing code and visualizations, the dataset used in this pro
 - Reviews spanning a 5-star rating scale with an average rating of approximately 3.8 stars
 
 ![Data distribution visualization showing the distribution of ratings across the 5-star scale](ratings_dist.png)
+
 ### 3.4 Data Characteristics
 
 #### Business Data
+
 Businesses are categorized into multiple categories (e.g., "Restaurants", "Nightlife", "Shopping"), with businesses often belonging to multiple categories. The geographic distribution covers multiple cities and states, with varying densities of businesses per location.
 
 #### User Data
+
 The user dataset contains a wide distribution of user activity levels, from casual users with only a few reviews to power users with hundreds of reviews. User data includes metrics on how other users have rated their reviews (useful, funny, cool votes).
 
 #### Review Data
+
 Reviews include both a numerical star rating (1-5) and textual content. The review length varies significantly, with an average of approximately 708 characters per review. Reviews also contain timestamps allowing for temporal analysis.
 
 ![Review length distribution by rating category](review_length.png)
 
 #### Check-in Data
+
 Check-in data provides temporal patterns of business visits, including time of day and day of week information. This data offers additional context beyond explicit reviews.
 
 ### Data Preprocessing
@@ -267,6 +272,7 @@ The data processing layer handles the extraction, transformation, and loading (E
 #### 4.2.1 Data Extraction
 
 The system extracts data from the Yelp JSON files using the extraction module. This module:
+
 - Loads JSON data line by line to handle large files efficiently
 - Extracts essential business and user information
 - Creates standardized CSV outputs for further processing
@@ -274,6 +280,7 @@ The system extracts data from the Yelp JSON files using the extraction module. T
 #### 4.2.2 Data Preprocessing
 
 The preprocessing module performs several critical transformations:
+
 - Feature engineering to derive additional business and user attributes
 - Statistical aggregation of review metrics
 - Temporal feature extraction from review dates
@@ -283,6 +290,7 @@ The preprocessing module performs several critical transformations:
 #### 4.2.3 Data Visualization
 
 The visualization component provides exploratory data analysis capabilities:
+
 - Distribution analysis of ratings, review lengths, and other features
 - Correlation analysis between features
 - Temporal pattern visualization
@@ -295,12 +303,14 @@ The system leverages both traditional tabular storage and graph database technol
 #### 4.3.1 Neo4j Graph Database
 
 The graph database module constructs a knowledge graph representation of the Yelp ecosystem in Neo4j:
+
 - Nodes represent entities (users, businesses, categories, cities)
 - Edges represent relationships (wrote, about, in_category, located_in)
 - Properties store entity attributes (stars, review_count, etc.)
 - Constraints and indexes optimize query performance
 
 The graph schema includes:
+
 - **User nodes**: Representing Yelp users with attributes like name, review_count, average_stars
 - **Business nodes**: Representing businesses with attributes like name, address, stars, categories
 - **Review nodes**: Connecting users and businesses with attributes like rating, date, text
@@ -312,6 +322,7 @@ The graph schema includes:
 #### 4.3.2 Matrix Representation
 
 For collaborative filtering approaches, the system maintains sparse matrix representations of:
+
 - User-item interaction matrices (ratings)
 - User-feature matrices
 - Item-feature matrices
@@ -323,11 +334,13 @@ The system implements two primary recommendation strategies:
 #### 4.4.1 Collaborative Filtering Engine
 
 The collaborative filtering engine includes:
+
 - **User-based collaborative filtering**: Recommends items based on similar users' preferences
 - **Matrix factorization**: Decomposes the user-item matrix into latent factor representations
 - **Baseline predictors**: Implements global mean, user bias, and item bias models for baseline predictions
 
 The matrix factorization implementation uses stochastic gradient descent to optimize:
+
 - Latent factor dimensionality (configurable)
 - Learning rate
 - Regularization parameters
@@ -338,6 +351,7 @@ The implementation follows the approach outlined by Koren et al. [2], where the 
 $$\hat{r}_{ui} = \mu + b_u + b_i + q_i^T p_u$$
 
 Where:
+
 - $\mu$ is the global mean rating
 - $b_u$ is the user bias
 - $b_i$ is the item bias
@@ -347,6 +361,7 @@ Where:
 #### 4.4.2 Graph-Based Recommendation Engine
 
 The graph-based recommendation engine leverages the Neo4j database to:
+
 - Find paths between users and potential businesses of interest
 - Identify common category preferences
 - Discover neighborhood patterns
@@ -355,6 +370,7 @@ The graph-based recommendation engine leverages the Neo4j database to:
 The graph-based recommendation approach employs several Cypher queries to extract recommendation signals:
 
 1. **Category-based recommendations**:
+
 ```cypher
 MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)-[:IN_CATEGORY]->(c:Category)
 WITH u, c, COUNT(*) as frequency
@@ -367,6 +383,7 @@ LIMIT 10
 ```
 
 2. **Collaborative path-based recommendations**:
+
 ```cypher
 MATCH (u1:User {user_id: $user_id})-[:WROTE]->(:Review)-[:ABOUT]->(b:Business)<-[:ABOUT]-(:Review)<-[:WROTE]-(u2:User),
       (u2)-[:WROTE]->(:Review)-[:ABOUT]->(rec:Business)
@@ -382,6 +399,7 @@ These graph patterns enable the system to capture complex relationships that are
 ### 4.5 User Interface Layer
 
 The user interface provides an interactive Streamlit application for:
+
 - User and business profile exploration
 - Recommendation generation using both collaborative filtering and graph-based strategies
 - Model training and evaluation
@@ -389,6 +407,7 @@ The user interface provides an interactive Streamlit application for:
 - Recommendation explanation
 
 The UI layer includes:
+
 - **Session state management**: Maintains model state and user selections between interactions
 - **Visualization components**: Renders interactive charts and graphs
 - **Recommendation cards**: Displays businesses with predicted ratings
@@ -413,6 +432,7 @@ The recommendation system was implemented using a combination of Python librarie
 #### 5.1.2 Hardware Configuration
 
 The system was developed and tested on:
+
 - 16GB RAM
 - 8-core CPU
 - SSD storage for database and application
@@ -420,6 +440,7 @@ The system was developed and tested on:
 #### 5.1.3 Neo4j Configuration
 
 The Neo4j database was configured with:
+
 - Bolt protocol on port 7687
 - 8GB heap memory allocation
 - Indexes on critical node properties (business_id, user_id, name)
@@ -428,6 +449,7 @@ The Neo4j database was configured with:
 #### 5.1.4 Application Structure
 
 The application follows a modular structure with separate components for:
+
 - Data extraction and preprocessing
 - Graph database construction and querying
 - Collaborative filtering implementation
@@ -444,6 +466,7 @@ RMSE measures the square root of the average squared differences between predict
 $$RMSE = \sqrt{\frac{1}{n}\sum_{i=1}^{n}(y_i - \hat{y}_i)^2}$$
 
 Where:
+
 - $n$ is the number of predictions
 - $y_i$ is the actual rating
 - $\hat{y}_i$ is the predicted rating
@@ -473,6 +496,7 @@ The evaluation strategy included several experiments to assess different aspects
 #### 5.3.1 Model Comparison Experiment
 
 This experiment compares the performance of different recommendation approaches:
+
 - Baseline predictor (global mean + user bias + item bias)
 - User-based collaborative filtering
 - Matrix factorization
@@ -483,6 +507,7 @@ Metrics tracked: RMSE, MAE, correlation coefficient
 #### 5.3.2 Hyperparameter Optimization
 
 For the matrix factorization approach, several hyperparameters were optimized through grid search:
+
 - Number of latent factors (5-50)
 - Learning rate (0.001-0.1)
 - Regularization parameter (0.001-0.1)
@@ -493,6 +518,7 @@ The optimization used 5-fold cross-validation on a training set to prevent overf
 #### 5.3.3 Cold-Start Evaluation
 
 This experiment specifically evaluated performance on cold-start scenarios:
+
 - New users (with fewer than 5 reviews)
 - New businesses (with fewer than 10 reviews)
 - Comparing collaborative filtering vs. graph-based approaches for these cases
