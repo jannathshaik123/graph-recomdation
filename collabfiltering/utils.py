@@ -586,7 +586,7 @@ def main():
         
         # Save model and ratings matrix
         model.save_model(model_dir)
-        save_ratings_matrix(train_matrix, os.path.join(model_dir, "ratings_matrix.npz"))
+        save_npz(os.path.join(model_dir, "ratings_matrix.npz"), train_matrix)
         
         ratings_matrix = train_matrix
     
