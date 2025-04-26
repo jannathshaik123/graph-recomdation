@@ -542,7 +542,7 @@ def main():
     """Main function to run the collaborative filtering system"""
     # Replace with your actual file path
     file_path = os.path.join(os.path.dirname(os.path.dirname(os.getcwd())), "data/preprocessed_data/train_features.csv")
-    model_dir = "model"
+    model_dir = "model_new"  # Change to a new directory if needed
     
     # For memory constraints, sample the data
     sample_size = 100000  # Adjust based on machine's memory
@@ -555,7 +555,7 @@ def main():
     if os.path.exists(os.path.join(model_dir, "model_params.pkl")):
         print("Loading existing model...")
         model = ImprovedCollaborativeFiltering.load_model(model_dir)
-        ratings_matrix = load_ratings_matrix(os.path.join(model_dir, "ratings_matrix.npz"))
+        ratings_matrix = load_npz(os.path.join(model_dir, "ratings_matrix.npz"))
         
         # Load test data for evaluation
         _, all_data, _, _ = prepare_data(file_path, sample_size, min_user_ratings, min_business_ratings)
@@ -628,7 +628,7 @@ def recommend_for_user(user_id, n=5, method='hybrid', model_dir='model'):
     """
     # Load model and data
     model = ImprovedCollaborativeFiltering.load_model(model_dir)
-    ratings_matrix = load_ratings_matrix(os.path.join(model_dir, "ratings_matrix.npz"))
+    ratings_matrix = load_npz(os.path.join(model_dir, "ratings_matrix.npz"))
     
     # Check if user exists
     if user_id not in model.user_to_idx:
