@@ -60,6 +60,8 @@ def get_user_ids_with_names(model, user_info, n=100):
         # Return either all user IDs or a sample of n
         user_ids = list(model.user_to_idx.keys())
         if len(user_ids) > n:
+            # Use a fixed seed for consistent sampling
+            np.random.seed(42)
             sample_ids = np.random.choice(user_ids, n, replace=False).tolist()
         else:
             sample_ids = user_ids
@@ -67,6 +69,7 @@ def get_user_ids_with_names(model, user_info, n=100):
         # Create display names with username if available
         user_options = []
         for user_id in sample_ids:
+            display_name = user_id
             if user_id in user_info and 'name' in user_info[user_id]:
                 display_name = f"{user_info[user_id]['name']} ({user_id})"
             user_options.append({"label": display_name, "value": user_id})
@@ -459,6 +462,9 @@ def main():
     business_info = load_business_data()
     user_info = load_user_data()
     
+    # Initialize session state for storing user selection
+    if 'selected_user_id' not in st.session_state:
+        st.session_state.selected_user_id = None
     
     # Add module reloading button to sidebar
     with st.sidebar:
@@ -477,25 +483,28 @@ def main():
         
         # Show dropdown of sample user IDs with names
         user_options = get_user_ids_with_names(model, user_info, n=100)
+        
         # Format for display
         display_options = [u["label"] for u in user_options]
         user_values = [u["value"] for u in user_options]
         
-        # selected_index = user_options.ind if user_options else None
         selected_option = st.selectbox(
             "Or select a user from the sample list",
-            options=display_options
+            options=display_options,
+            index=0 if display_options else None
         )
         
         # Map selected option back to user ID
         if selected_option:
             selected_idx = display_options.index(selected_option)
             selected_user_id = user_values[selected_idx]
+            # Store in session state
+            st.session_state.selected_user_id = selected_user_id
         else:
             selected_user_id = None
         
         # Use the entered ID if provided, otherwise use the selected one
-        user_id = user_id_input if user_id_input else selected_user_id
+        user_id = user_id_input if user_id_input else st.session_state.selected_user_id
         
         # Method selection
         method = st.radio(
@@ -519,9 +528,11 @@ def main():
         show_similar_users = st.checkbox("Show Similar Users", value=True)
         show_metrics = st.checkbox("Show Model Metrics", value=False)
         
-        
-        # Get recommendations button
+        # Get recommendations button - explicitly log the user ID being used
         get_recs_button = st.button("Get Recommendations", type="primary")
+        
+        # Debug output - show which user ID is currently selected
+        st.write(f"Current User ID: {user_id}")
     
     # Main page content
     if not user_id:
@@ -535,7 +546,10 @@ def main():
             # Find user name from format string
             for option in user_options:
                 if option["value"] == user_id:
-                    user_name = option["label"].split(" (")[0]
+                    # Extract name from "Name (user_id)" format
+                    parts = option["label"].split(" (")
+                    if len(parts) > 1:
+                        user_name = parts[0]
                     break
         
         # Display user information
