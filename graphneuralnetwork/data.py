@@ -88,11 +88,26 @@ class Neo4jDataLoader:
             if business_features.shape[1] < feature_dim:
                 padding = np.zeros((business_features.shape[0], feature_dim - business_features.shape[1]))
                 business_features = np.hstack([business_features, padding])
+
+            # Calculate the actual number of users and businesses based on the mappings
+            num_users = len(user_mapping)
+            num_businesses = len(business_mapping)
             
-            # Combine user and business features
-            x = np.zeros((num_nodes, feature_dim), dtype=np.float32)
-            x[:len(user_mapping)] = user_features
-            x[len(user_mapping):] = business_features
+            # Create x tensor with the correct sizes
+            x = np.zeros((num_users + num_businesses, feature_dim), dtype=np.float32)
+            x[:num_users] = user_features
+            
+            # Make sure we're only using the business features that correspond to businesses in the mapping
+            # This ensures we don't try to use more businesses than we have indices for
+            if business_features.shape[0] > num_businesses:
+                print(f"Warning: Truncating business features from {business_features.shape[0]} to {num_businesses}")
+                business_features = business_features[:num_businesses]
+            elif business_features.shape[0] < num_businesses:
+                print(f"Warning: Padding business features from {business_features.shape[0]} to {num_businesses}")
+                padding = np.zeros((num_businesses - business_features.shape[0], feature_dim), dtype=np.float32)
+                business_features = np.vstack([business_features, padding])
+                
+            x[num_users:] = business_features
             
             # Convert to torch tensor
             x = torch.FloatTensor(x)
