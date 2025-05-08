@@ -88,8 +88,8 @@ class YelpGNN(nn.Module):
         prev_x = None  # For residual connections
         
         for i, conv in enumerate(self.convs):
-            # For residual connections
-            if self.residual and i > 0 and x.size(-1) == prev_x.size(-1):
+            # Save previous layer output for residual connections
+            if self.residual and i > 0:
                 prev_x = x
             
             # GNN layer
