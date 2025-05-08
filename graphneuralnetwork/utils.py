@@ -60,6 +60,10 @@ class YelpTrainer:
         graph_data = graph_data.to(self.device)
         x, edge_index, edge_attr = graph_data.x, graph_data.edge_index, graph_data.edge_attr
         
+        # Ensure train and val data are on the correct device
+        train_data = train_data.to(self.device)
+        val_data = val_data.to(self.device)
+        
         # Create sampler for neighbor sampling
         self._setup_neighbor_sampler(graph_data, train_data, val_data, batch_size, num_neighbors)
         
@@ -205,13 +209,14 @@ class YelpTrainer:
             # Move batch to device
             batch = batch.to(self.device)
             
-            # Filter pairs that contain nodes in this batch
-            batch_users = self.train_pairs[:, 0]
-            batch_businesses = self.train_pairs[:, 1]
+            # Get relevant tensors and ensure they're on the right device
+            batch_users = self.train_pairs[:, 0].to(self.device)
+            batch_businesses = self.train_pairs[:, 1].to(self.device)
+            batch_n_id = batch.n_id.to(self.device)
             
             # Find pairs where both user and business are in the current batch
-            user_mask = torch.isin(batch_users, batch.n_id)
-            business_mask = torch.isin(batch_businesses, batch.n_id)
+            user_mask = torch.isin(batch_users, batch_n_id)
+            business_mask = torch.isin(batch_businesses, batch_n_id)
             pair_mask = user_mask & business_mask
             
             if not pair_mask.any():
@@ -219,18 +224,41 @@ class YelpTrainer:
             
             batch_pairs = self.train_pairs[pair_mask]
             
-            # Map global indices to batch indices
-            batch_user_indices = torch.tensor([torch.where(batch.n_id == user_idx)[0][0] for user_idx in batch_pairs[:, 0]])
-            batch_business_indices = torch.tensor([torch.where(batch.n_id == business_idx)[0][0] for business_idx in batch_pairs[:, 1]])
-            batch_stars = batch_pairs[:, 2].float()
+            # Map global indices to batch indices - use lists to avoid tensor construction issues
+            batch_user_indices = []
+            batch_business_indices = []
+            
+            for user_idx in batch_pairs[:, 0]:
+                match_indices = torch.where(batch_n_id == user_idx)[0]
+                if len(match_indices) > 0:
+                    batch_user_indices.append(match_indices[0].item())
+                    
+            for business_idx in batch_pairs[:, 1]:
+                match_indices = torch.where(batch_n_id == business_idx)[0]
+                if len(match_indices) > 0:
+                    batch_business_indices.append(match_indices[0].item())
+            
+            # Convert to tensors and move to device
+            batch_user_indices = torch.tensor(batch_user_indices, device=self.device)
+            batch_business_indices = torch.tensor(batch_business_indices, device=self.device)
+            batch_stars = batch_pairs[:, 2].float().to(self.device)
+            
+            # Make sure the number of users and businesses match
+            min_len = min(len(batch_user_indices), len(batch_business_indices), len(batch_stars))
+            if min_len == 0:
+                continue
+                
+            batch_user_indices = batch_user_indices[:min_len]
+            batch_business_indices = batch_business_indices[:min_len]
+            batch_stars = batch_stars[:min_len]
             
             # Forward pass
             scores = self.model(batch.x, batch.edge_index, 
-                              user_indices=batch_user_indices.to(self.device), 
-                              business_indices=batch_business_indices.to(self.device))
+                              user_indices=batch_user_indices, 
+                              business_indices=batch_business_indices)
             
             # Calculate loss
-            loss = criterion(scores, batch_stars.to(self.device))
+            loss = criterion(scores, batch_stars)
             
             # Scale loss for gradient accumulation
             loss = loss / gradient_accumulation_steps
@@ -270,13 +298,14 @@ class YelpTrainer:
                 # Move batch to device
                 batch = batch.to(self.device)
                 
-                # Filter pairs that contain nodes in this batch
-                batch_users = self.val_pairs[:, 0]
-                batch_businesses = self.val_pairs[:, 1]
+                # Get relevant tensors and ensure they're on the right device
+                batch_users = self.val_pairs[:, 0].to(self.device)
+                batch_businesses = self.val_pairs[:, 1].to(self.device)
+                batch_n_id = batch.n_id.to(self.device)
                 
                 # Find pairs where both user and business are in the current batch
-                user_mask = torch.isin(batch_users, batch.n_id)
-                business_mask = torch.isin(batch_businesses, batch.n_id)
+                user_mask = torch.isin(batch_users, batch_n_id)
+                business_mask = torch.isin(batch_businesses, batch_n_id)
                 pair_mask = user_mask & business_mask
                 
                 if not pair_mask.any():
@@ -284,18 +313,41 @@ class YelpTrainer:
                 
                 batch_pairs = self.val_pairs[pair_mask]
                 
-                # Map global indices to batch indices
-                batch_user_indices = torch.tensor([torch.where(batch.n_id == user_idx)[0][0] for user_idx in batch_pairs[:, 0]])
-                batch_business_indices = torch.tensor([torch.where(batch.n_id == business_idx)[0][0] for business_idx in batch_pairs[:, 1]])
-                batch_stars = batch_pairs[:, 2].float()
+                # Map global indices to batch indices - use lists to avoid tensor construction issues
+                batch_user_indices = []
+                batch_business_indices = []
+                
+                for user_idx in batch_pairs[:, 0]:
+                    match_indices = torch.where(batch_n_id == user_idx)[0]
+                    if len(match_indices) > 0:
+                        batch_user_indices.append(match_indices[0].item())
+                        
+                for business_idx in batch_pairs[:, 1]:
+                    match_indices = torch.where(batch_n_id == business_idx)[0]
+                    if len(match_indices) > 0:
+                        batch_business_indices.append(match_indices[0].item())
+                
+                # Convert to tensors and move to device
+                batch_user_indices = torch.tensor(batch_user_indices, device=self.device)
+                batch_business_indices = torch.tensor(batch_business_indices, device=self.device)
+                batch_stars = batch_pairs[:, 2].float().to(self.device)
+                
+                # Make sure the number of users and businesses match
+                min_len = min(len(batch_user_indices), len(batch_business_indices), len(batch_stars))
+                if min_len == 0:
+                    continue
+                    
+                batch_user_indices = batch_user_indices[:min_len]
+                batch_business_indices = batch_business_indices[:min_len]
+                batch_stars = batch_stars[:min_len]
                 
                 # Forward pass
                 scores = self.model(batch.x, batch.edge_index, 
-                                  user_indices=batch_user_indices.to(self.device), 
-                                  business_indices=batch_business_indices.to(self.device))
+                                  user_indices=batch_user_indices, 
+                                  business_indices=batch_business_indices)
                 
                 # Calculate loss
-                loss = criterion(scores, batch_stars.to(self.device))
+                loss = criterion(scores, batch_stars)
                 
                 # Track metrics
                 total_loss += loss.item()
@@ -331,6 +383,7 @@ class YelpTrainer:
         """
         self.model.eval()
         graph_data = graph_data.to(self.device)
+        test_data = test_data.to(self.device)
         
         # Create test loader
         test_users = test_data[:, 0].unique()
@@ -354,13 +407,14 @@ class YelpTrainer:
                 # Move batch to device
                 batch = batch.to(self.device)
                 
-                # Filter pairs that contain nodes in this batch
-                batch_users = test_data[:, 0]
-                batch_businesses = test_data[:, 1]
+                # Get relevant tensors and ensure they're on the right device
+                batch_users = test_data[:, 0].to(self.device)
+                batch_businesses = test_data[:, 1].to(self.device)
+                batch_n_id = batch.n_id.to(self.device)
                 
                 # Find pairs where both user and business are in the current batch
-                user_mask = torch.isin(batch_users, batch.n_id)
-                business_mask = torch.isin(batch_businesses, batch.n_id)
+                user_mask = torch.isin(batch_users, batch_n_id)
+                business_mask = torch.isin(batch_businesses, batch_n_id)
                 pair_mask = user_mask & business_mask
                 
                 if not pair_mask.any():
@@ -368,15 +422,38 @@ class YelpTrainer:
                 
                 batch_pairs = test_data[pair_mask]
                 
-                # Map global indices to batch indices
-                batch_user_indices = torch.tensor([torch.where(batch.n_id == user_idx)[0][0] for user_idx in batch_pairs[:, 0]])
-                batch_business_indices = torch.tensor([torch.where(batch.n_id == business_idx)[0][0] for business_idx in batch_pairs[:, 1]])
-                batch_stars = batch_pairs[:, 2].float()
+                # Map global indices to batch indices - use lists to avoid tensor construction issues
+                batch_user_indices = []
+                batch_business_indices = []
+                
+                for user_idx in batch_pairs[:, 0]:
+                    match_indices = torch.where(batch_n_id == user_idx)[0]
+                    if len(match_indices) > 0:
+                        batch_user_indices.append(match_indices[0].item())
+                        
+                for business_idx in batch_pairs[:, 1]:
+                    match_indices = torch.where(batch_n_id == business_idx)[0]
+                    if len(match_indices) > 0:
+                        batch_business_indices.append(match_indices[0].item())
+                
+                # Convert to tensors and move to device
+                batch_user_indices = torch.tensor(batch_user_indices, device=self.device)
+                batch_business_indices = torch.tensor(batch_business_indices, device=self.device)
+                batch_stars = batch_pairs[:, 2].float().to(self.device)
+                
+                # Make sure the number of users and businesses match
+                min_len = min(len(batch_user_indices), len(batch_business_indices), len(batch_stars))
+                if min_len == 0:
+                    continue
+                    
+                batch_user_indices = batch_user_indices[:min_len]
+                batch_business_indices = batch_business_indices[:min_len]
+                batch_stars = batch_stars[:min_len]
                 
                 # Forward pass
                 scores = self.model(batch.x, batch.edge_index, 
-                                  user_indices=batch_user_indices.to(self.device), 
-                                  business_indices=batch_business_indices.to(self.device))
+                                  user_indices=batch_user_indices, 
+                                  business_indices=batch_business_indices)
                 
                 # Store predictions
                 all_preds.extend(scores.cpu().numpy())

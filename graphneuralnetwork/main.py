@@ -93,6 +93,10 @@ def main():
     if args.cache_dir:
         os.makedirs(args.cache_dir, exist_ok=True)
     
+    # Create checkpoint directory if needed
+    if args.checkpoint_dir:
+        os.makedirs(args.checkpoint_dir, exist_ok=True)
+    
     # Initialize data loader
     data_loader = Neo4jDataLoader(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, batch_size=args.batch_size)
     
