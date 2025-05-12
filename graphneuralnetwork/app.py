@@ -176,31 +176,49 @@ class RecommendationExplorer:
         
         return recommendations
     
-    def visualize_graph_structure(self):
+    def visualize_graph_structure(self, max_nodes=5000):
         """Create a visualization of the graph structure."""
         # Create a NetworkX graph
         G = nx.Graph()
         
-        # Add nodes
+        # Create a mapping of graph indices to node IDs
+        graph_node_mapping = {}
+        
+        # Add nodes with a limit to prevent overwhelming visualization
+        node_count = 0
         for idx, node_type in self.node_types.items():
-            node_id = self.reverse_mapping[idx]
-            if node_type == 'user':
-                G.add_node(node_id, type='user')
-            else:
-                G.add_node(node_id, type='business')
+            if node_count >= max_nodes:
+                break
+            
+            try:
+                node_id = self.reverse_mapping[idx]
+                graph_node_mapping[idx] = node_id
+                
+                if node_type == 'user':
+                    G.add_node(node_id, type='user')
+                else:
+                    G.add_node(node_id, type='business')
+                
+                node_count += 1
+            except KeyError:
+                # Skip nodes not in reverse mapping
+                continue
         
         # Add edges from the edge index
         edge_index_np = self.graph_data.edge_index.numpy()
         for i in range(edge_index_np.shape[1]):
             source_idx = edge_index_np[0, i]
             target_idx = edge_index_np[1, i]
-            source_id = self.reverse_mapping[source_idx]
-            target_id = self.reverse_mapping[target_idx]
-            G.add_edge(source_id, target_id)
+            
+            # Only add edge if both nodes are in our mapped nodes
+            if source_idx in graph_node_mapping and target_idx in graph_node_mapping:
+                source_id = graph_node_mapping[source_idx]
+                target_id = graph_node_mapping[target_idx]
+                G.add_edge(source_id, target_id)
         
         # Visualize
         plt.figure(figsize=(20, 12))
-        pos = nx.spring_layout(G, k=0.5, iterations=50)
+        pos = nx.spring_layout(G, k=0.5, iterations=50, seed=42)
         
         # Draw nodes
         user_nodes = [n for n, d in G.nodes(data=True) if d['type'] == 'user']
@@ -212,9 +230,10 @@ class RecommendationExplorer:
         # Draw edges
         nx.draw_networkx_edges(G, pos, alpha=0.1)
         
-        plt.title("Yelp Graph Network Structure")
+        plt.title(f"Yelp Graph Network Structure (Showing {len(G.nodes)} nodes)")
         plt.legend()
         plt.axis('off')
+        plt.tight_layout()
         return plt
 
 def main():
@@ -234,17 +253,47 @@ def main():
     
     if page == "Graph Visualization":
         st.header("Graph Network Structure")
-        st.write("This visualization shows the network of users and businesses in the Yelp dataset.")
+        st.write("This visualization shows a sample of the network of users and businesses in the Yelp dataset.")
         
-        # Create graph visualization
-        graph_plt = explorer.visualize_graph_structure()
-        st.pyplot(graph_plt)
+        try:
+            # Create graph visualization
+            with st.spinner('Generating graph visualization...'):
+                graph_plt = explorer.visualize_graph_structure(max_nodes=5000)
+                
+            # Display the plot
+            st.pyplot(graph_plt)
+            plt.close()  # Close the plot to free up memory
+        
+        except Exception as e:
+            st.error(f"Error generating graph visualization: {e}")
+            st.warning("This could be due to very large graph or data inconsistencies.")
         
         # Additional graph statistics
         st.subheader("Graph Statistics")
-        st.write(f"Total Nodes: {len(explorer.node_types)}")
-        st.write(f"Users: {sum(1 for t in explorer.node_types.values() if t == 'user')}")
-        st.write(f"Businesses: {sum(1 for t in explorer.node_types.values() if t == 'business')}")
+        
+        # Count nodes safely
+        total_nodes = len(explorer.node_types)
+        users_count = sum(1 for t in explorer.node_types.values() if t == 'user')
+        businesses_count = sum(1 for t in explorer.node_types.values() if t == 'business')
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Total Nodes", total_nodes)
+        
+        with col2:
+            st.metric("Users", users_count)
+        
+        with col3:
+            st.metric("Businesses", businesses_count)
+        
+        # Edge information
+        try:
+            edge_count = explorer.graph_data.edge_index.size(1) // 2  # Divide by 2 as graph is undirected
+            st.metric("Total Connections", edge_count)
+        except Exception as e:
+            st.error(f"Error fetching edge count: {e}")
+            st.warning("This could be due to data inconsistencies.")
     
     elif page == "User Profile Explorer":
         st.header("User Profile Explorer")
