@@ -189,7 +189,7 @@ class YelpRecommendationInference:
         
         return df_recommendations
     
-    def _enrich_business_data(self, df_recommendations):
+    def _enrich_business_data(self, df_recommendations, score_col='score'):
         """Add additional business information to recommendations."""
         business_ids = df_recommendations['business_id'].tolist()
         
@@ -222,7 +222,7 @@ class YelpRecommendationInference:
             business_id = row['business_id']
             data = {
                 'business_id': business_id,
-                'predicted_score': row['score']
+                'predicted_score': row[score_col]
             }
             
             # Add additional info if available
@@ -267,7 +267,7 @@ class YelpRecommendationInference:
             business_embeds = embeddings[business_indices]
             
             # Compute cosine similarity
-            similarity = F.cosine_similarity(query_embed.unsqueeze(0), business_embeds)
+            similarity = torch.nn.functional.cosine_similarity(query_embed.unsqueeze(0), business_embeds)
             similarity = similarity.cpu().numpy()
         
         # Create recommendations DataFrame
@@ -286,7 +286,7 @@ class YelpRecommendationInference:
         df_similar = df_similar.sort_values('similarity', ascending=False).head(top_k)
         
         # Enrich with business data
-        df_similar = self._enrich_business_data(df_similar)
+        df_similar = self._enrich_business_data(df_similar, score_col='similarity')
         df_similar = df_similar.rename(columns={'predicted_score': 'similarity'})
         
         return df_similar
