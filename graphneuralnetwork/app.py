@@ -1,378 +1,173 @@
 import os
-import sys
-import numpy as np
-import pandas as pd
 import streamlit as st
 import torch
-import networkx as nx
-import matplotlib.pyplot as plt
-import seaborn as sns
+import pandas as pd
+import sys
 
-# Add the project directory to Python path
+# Add the project directory to the Python path
 project_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(project_dir)
 
-# Import custom modules
-from data import Neo4jDataLoader
-from model import YelpGNN, YelpRecommender
-from utils import YelpTrainer
+from inference import YelpRecommendationInference
 
 # Neo4j connection configuration
-NEO4J_URI = "bolt://localhost:7687"
+NEO4J_URI = "bolt://localhost:7687"  # Update if your Neo4j instance is hosted elsewhere
 NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "password"
+NEO4J_PASSWORD = "password"  # Change this to your actual password
 
-# Streamlit app configuration
-st.set_page_config(page_title="Yelp Recommendation Explorer", layout="wide")
+# Cached model path
+MODEL_PATH = os.path.join(project_dir, 'checkpoints', 'best_model.pt')
+CACHE_DIR = os.path.join(project_dir, 'cache')
 
-class RecommendationExplorer:
-    def __init__(self):
-        # Initialize Neo4j data loader
-        self.data_loader = Neo4jDataLoader(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
-        
-        # Load pre-trained model
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        # Load graph data and model
-        self.graph_data = self.data_loader.load_graph_data(cache_dir='cache')
-        
-        # Initialize and load model
-        input_dim = self.graph_data.x.size(1)
-        gnn_model = YelpGNN(
-            input_dim=input_dim,
-            hidden_dim=64,
-            output_dim=32,
-            num_layers=2,
-            dropout=0.3,
-            gnn_type='sage',
-            residual=True,
-            batch_norm=True
-        )
-        self.recommender_model = YelpRecommender(gnn_model)
-        
-        # Load trainer to use its predict method
-        self.trainer = YelpTrainer(self.recommender_model, device=self.device)
-        checkpoint_path = os.path.join('checkpoints', 'best_model.pt')
-        self.trainer.load_checkpoint(checkpoint_path)
-        
-        # Mapping between indices and actual IDs
-        self.node_mapping = self.data_loader.node_mapping
-        self.reverse_mapping = self.data_loader.reverse_mapping
-        self.node_types = self.data_loader.node_types
-        
-        # Fetch additional node information
-        self._fetch_node_details()
+def get_user_list():
+    """Fetch list of users from Neo4j."""
+    inference = YelpRecommendationInference(MODEL_PATH, cache_dir=CACHE_DIR)
     
-    def _fetch_node_details(self):
-        """Fetch user and business names from Neo4j."""
-        self.user_details = {}
-        self.business_details = {}
-        
-        with self.data_loader.driver.session() as session:
-            # Fetch user details
-            user_query = """
+    try:
+        with inference.data_loader.driver.session() as session:
+            query = """
             MATCH (u:User)
-            RETURN u.user_id AS user_id, u.name AS name
+            RETURN u.user_id AS user_id, 
+                   u.name AS name 
+            LIMIT 100  # Limit to prevent overwhelming the dropdown
             """
-            for record in session.run(user_query):
-                self.user_details[record['user_id']] = record['name']
-            
-            # Fetch business details
-            business_query = """
+            result = session.run(query)
+            users = [{'user_id': record['user_id'], 'name': record['name'] or record['user_id']} for record in result]
+    finally:
+        inference.close()
+    
+    return users
+
+def get_business_list():
+    """Fetch list of businesses from Neo4j."""
+    inference = YelpRecommendationInference(MODEL_PATH, cache_dir=CACHE_DIR)
+    
+    try:
+        with inference.data_loader.driver.session() as session:
+            query = """
             MATCH (b:Business)
-            RETURN b.business_id AS business_id, b.name AS name, b.city AS city
+            RETURN b.business_id AS business_id, 
+                   b.name AS name 
+            LIMIT 100  # Limit to prevent overwhelming the dropdown
             """
-            for record in session.run(business_query):
-                self.business_details[record['business_id']] = {
-                    'name': record['name'],
-                    'city': record['city']
-                }
+            result = session.run(query)
+            businesses = [{'business_id': record['business_id'], 'name': record['name'] or record['business_id']} for record in result]
+    finally:
+        inference.close()
     
-    def get_user_name(self, user_id):
-        """Get user name from user ID."""
-        return self.user_details.get(user_id, user_id)
-    
-    def get_business_info(self, business_id):
-        """Get business name and city from business ID."""
-        return self.business_details.get(business_id, {'name': business_id, 'city': 'Unknown'})
-    
-    def get_user_profile(self, user_id):
-        """Fetch detailed user profile from Neo4j."""
-        with self.data_loader.driver.session() as session:
-            query = """
-            MATCH (u:User {user_id: $user_id})
-            OPTIONAL MATCH (u)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
-            RETURN u.review_count AS review_count, 
-                   u.average_stars AS average_stars,
-                   u.useful_votes AS useful_votes,
-                   u.funny_votes AS funny_votes,
-                   u.cool_votes AS cool_votes,
-                   COUNT(DISTINCT b) AS unique_businesses_reviewed
-            """
-            result = session.run(query, user_id=user_id).single()
-            return dict(result) if result else {}
-    
-    def get_business_profile(self, business_id):
-        """Fetch detailed business profile from Neo4j."""
-        with self.data_loader.driver.session() as session:
-            query = """
-            MATCH (b:Business {business_id: $business_id})
-            OPTIONAL MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b)
-            RETURN b.stars AS avg_stars, 
-                   b.review_count AS review_count,
-                   b.latitude AS latitude,
-                   b.longitude AS longitude,
-                   b.is_open AS is_open,
-                   b.city AS city,
-                   b.state AS state,
-                   AVG(r.stars) AS avg_review_stars,
-                   COUNT(DISTINCT u) AS total_reviewers
-            """
-            result = session.run(query, business_id=business_id).single()
-            return dict(result) if result else {}
-    
-    def get_recommendations(self, user_id, top_k=5):
-        """Generate recommendations for a user."""
-        # Find the user's index in the graph
-        user_global_idx = None
-        for idx, node_id in self.reverse_mapping.items():
-            if node_id == user_id:
-                user_global_idx = idx
-                break
-        
-        if user_global_idx is None:
-            return []
-        
-        # Prepare graph data
-        x = self.graph_data.x.to(self.device)
-        edge_index = self.graph_data.edge_index.to(self.device)
-        
-        # Get node embeddings
-        with torch.no_grad():
-            embeddings = self.recommender_model.gnn(x, edge_index)
-        
-        # Get user embedding
-        user_embedding = embeddings[user_global_idx].unsqueeze(0)
-        
-        # Calculate scores for all businesses
-        business_indices = [
-            idx for idx, node_type in self.node_types.items() 
-            if node_type == 'business'
-        ]
-        business_embeddings = embeddings[business_indices]
-        
-        # Compute similarity scores
-        similarities = torch.nn.functional.cosine_similarity(
-            user_embedding.expand_as(business_embeddings), 
-            business_embeddings
-        )
-        
-        # Get top-k recommendations
-        top_indices = torch.topk(similarities, top_k).indices
-        recommendations = [
-            self.reverse_mapping[business_indices[idx]] 
-            for idx in top_indices
-        ]
-        
-        return recommendations
-    
-    def visualize_graph_structure(self, max_nodes=5000):
-        """Create a visualization of the graph structure."""
-        # Create a NetworkX graph
-        G = nx.Graph()
-        
-        # Create a mapping of graph indices to node IDs
-        graph_node_mapping = {}
-        
-        # Add nodes with a limit to prevent overwhelming visualization
-        node_count = 0
-        for idx, node_type in self.node_types.items():
-            if node_count >= max_nodes:
-                break
-            
-            try:
-                node_id = self.reverse_mapping[idx]
-                graph_node_mapping[idx] = node_id
-                
-                if node_type == 'user':
-                    G.add_node(node_id, type='user')
-                else:
-                    G.add_node(node_id, type='business')
-                
-                node_count += 1
-            except KeyError:
-                # Skip nodes not in reverse mapping
-                continue
-        
-        # Add edges from the edge index
-        edge_index_np = self.graph_data.edge_index.numpy()
-        for i in range(edge_index_np.shape[1]):
-            source_idx = edge_index_np[0, i]
-            target_idx = edge_index_np[1, i]
-            
-            # Only add edge if both nodes are in our mapped nodes
-            if source_idx in graph_node_mapping and target_idx in graph_node_mapping:
-                source_id = graph_node_mapping[source_idx]
-                target_id = graph_node_mapping[target_idx]
-                G.add_edge(source_id, target_id)
-        
-        # Visualize
-        plt.figure(figsize=(20, 12))
-        pos = nx.spring_layout(G, k=0.5, iterations=50, seed=42)
-        
-        # Draw nodes
-        user_nodes = [n for n, d in G.nodes(data=True) if d['type'] == 'user']
-        business_nodes = [n for n, d in G.nodes(data=True) if d['type'] == 'business']
-        
-        nx.draw_networkx_nodes(G, pos, nodelist=user_nodes, node_color='lightblue', node_size=20, alpha=0.6, label='Users')
-        nx.draw_networkx_nodes(G, pos, nodelist=business_nodes, node_color='lightgreen', node_size=20, alpha=0.6, label='Businesses')
-        
-        # Draw edges
-        nx.draw_networkx_edges(G, pos, alpha=0.1)
-        
-        plt.title(f"Yelp Graph Network Structure (Showing {len(G.nodes)} nodes)")
-        plt.legend()
-        plt.axis('off')
-        plt.tight_layout()
-        return plt
+    return businesses
 
 def main():
-    # Initialize the recommendation explorer
-    explorer = RecommendationExplorer()
+    # Set page configuration
+    st.set_page_config(page_title="Yelp Recommendation System", page_icon=":star:", layout="wide")
     
-    # Streamlit app
-    st.title("🌟 Yelp Recommendation Explorer")
+    # Title
+    st.title("🌟 Yelp Recommendation System")
     
     # Sidebar for navigation
-    page = st.sidebar.selectbox("Choose a Page", [
-        "Graph Visualization", 
-        "User Profile Explorer", 
-        "Business Profile Explorer", 
-        "Recommendation System"
-    ])
+    st.sidebar.header("Recommendation Options")
     
-    if page == "Graph Visualization":
-        st.header("Graph Network Structure")
-        st.write("This visualization shows a sample of the network of users and businesses in the Yelp dataset.")
+    # Choose recommendation type
+    rec_type = st.sidebar.radio("Select Recommendation Type", 
+                                ["User Recommendations", "Similar Businesses"])
+    
+    # Load users and businesses
+    try:
+        users = get_user_list()
+        businesses = get_business_list()
+    except Exception as e:
+        st.error(f"Error connecting to Neo4j: {e}")
+        return
+    
+    # Initialize inference engine
+    try:
+        inference = YelpRecommendationInference(MODEL_PATH, cache_dir=CACHE_DIR)
+    except Exception as e:
+        st.error(f"Error initializing recommendation engine: {e}")
+        return
+    
+    # User Recommendations
+    if rec_type == "User Recommendations":
+        st.subheader("Get Personalized Business Recommendations")
         
-        try:
-            # Create graph visualization
-            with st.spinner('Generating graph visualization...'):
-                graph_plt = explorer.visualize_graph_structure(max_nodes=5000)
+        # User selection
+        user_options = {user['user_id']: user['name'] for user in users}
+        selected_user_id = st.selectbox(
+            "Select a User", 
+            list(user_options.keys()), 
+            format_func=lambda x: user_options.get(x, x)
+        )
+        
+        # Number of recommendations
+        top_k = st.slider("Number of Recommendations", 5, 20, 10)
+        
+        # Generate recommendations button
+        if st.button("Get Recommendations"):
+            try:
+                # Get recommendations
+                recommendations = inference.get_recommendations(
+                    user_id=selected_user_id, 
+                    top_k=top_k
+                )
                 
-            # Display the plot
-            st.pyplot(graph_plt)
-            plt.close()  # Close the plot to free up memory
-        
-        except Exception as e:
-            st.error(f"Error generating graph visualization: {e}")
-            st.warning("This could be due to very large graph or data inconsistencies.")
-        
-        # Additional graph statistics
-        st.subheader("Graph Statistics")
-        
-        # Count nodes safely
-        total_nodes = len(explorer.node_types)
-        users_count = sum(1 for t in explorer.node_types.values() if t == 'user')
-        businesses_count = sum(1 for t in explorer.node_types.values() if t == 'business')
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Total Nodes", total_nodes)
-        
-        with col2:
-            st.metric("Users", users_count)
-        
-        with col3:
-            st.metric("Businesses", businesses_count)
-        
-        # Edge information
-        try:
-            edge_count = explorer.graph_data.edge_index.size(1) // 2  # Divide by 2 as graph is undirected
-            st.metric("Total Connections", edge_count)
-        except Exception as e:
-            st.error(f"Error fetching edge count: {e}")
-            st.warning("This could be due to data inconsistencies.")
+                # Display recommendations
+                st.subheader(f"Top {top_k} Recommendations for {user_options.get(selected_user_id, selected_user_id)}")
+                
+                # Create columns for recommendations
+                for _, row in recommendations.iterrows():
+                    with st.container():
+                        st.markdown(f"**{row['name']}**")
+                        st.markdown(f"Stars: {row.get('stars', 'N/A')}")
+                        st.markdown(f"Review Count: {row.get('review_count', 'N/A')}")
+                        st.markdown(f"Categories: {row.get('categories', 'N/A')}")
+                        st.markdown(f"Predicted Score: {row['predicted_score']:.2f}")
+                        st.markdown("---")
+            
+            except Exception as e:
+                st.error(f"Error generating recommendations: {e}")
     
-    elif page == "User Profile Explorer":
-        st.header("User Profile Explorer")
+    # Similar Businesses
+    else:
+        st.subheader("Find Similar Businesses")
         
-        # Get list of users
-        users = list(explorer.user_details.keys())
-        selected_user_id = st.selectbox("Select a User", users)
+        # Business selection
+        business_options = {business['business_id']: business['name'] for business in businesses}
+        selected_business_id = st.selectbox(
+            "Select a Business", 
+            list(business_options.keys()), 
+            format_func=lambda x: business_options.get(x, x)
+        )
         
-        if selected_user_id:
-            # Fetch user profile
-            profile = explorer.get_user_profile(selected_user_id)
+        # Number of similar businesses
+        top_k = st.slider("Number of Similar Businesses", 5, 20, 10)
+        
+        # Generate similar businesses button
+        if st.button("Find Similar Businesses"):
+            try:
+                # Get similar businesses
+                similar_businesses = inference.get_similar_businesses(
+                    business_id=selected_business_id, 
+                    top_k=top_k
+                )
+                
+                # Display similar businesses
+                st.subheader(f"Top {top_k} Businesses Similar to {business_options.get(selected_business_id, selected_business_id)}")
+                
+                # Create columns for similar businesses
+                for _, row in similar_businesses.iterrows():
+                    with st.container():
+                        st.markdown(f"**{row['name']}**")
+                        st.markdown(f"Stars: {row.get('stars', 'N/A')}")
+                        st.markdown(f"Review Count: {row.get('review_count', 'N/A')}")
+                        st.markdown(f"Categories: {row.get('categories', 'N/A')}")
+                        st.markdown(f"Similarity Score: {row['similarity']:.2f}")
+                        st.markdown("---")
             
-            # Display user information
-            st.subheader(f"Profile for User: {explorer.get_user_name(selected_user_id)}")
-            
-            # Create columns for profile details
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.metric("Review Count", profile.get('review_count', 'N/A'))
-                st.metric("Average Stars", f"{profile.get('average_stars', 'N/A'):.2f}")
-                st.metric("Unique Businesses Reviewed", profile.get('unique_businesses_reviewed', 'N/A'))
-            
-            with col2:
-                st.metric("Useful Votes", profile.get('useful_votes', 'N/A'))
-                st.metric("Funny Votes", profile.get('funny_votes', 'N/A'))
-                st.metric("Cool Votes", profile.get('cool_votes', 'N/A'))
+            except Exception as e:
+                st.error(f"Error finding similar businesses: {e}")
     
-    elif page == "Business Profile Explorer":
-        st.header("Business Profile Explorer")
-        
-        # Get list of businesses
-        businesses = list(explorer.business_details.keys())
-        selected_business_id = st.selectbox("Select a Business", businesses)
-        
-        if selected_business_id:
-            # Fetch business profile
-            profile = explorer.get_business_profile(selected_business_id)
-            business_info = explorer.get_business_info(selected_business_id)
-            
-            # Display business information
-            st.subheader(f"Profile for Business: {business_info['name']}")
-            
-            # Create columns for profile details
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.metric("City", business_info.get('city', 'N/A'))
-                st.metric("Average Business Stars", f"{profile.get('avg_stars', 'N/A'):.2f}")
-                st.metric("Review Count", profile.get('review_count', 'N/A'))
-                st.metric("Status", "Open" if profile.get('is_open') else "Closed")
-            
-            with col2:
-                st.metric("Total Reviewers", profile.get('total_reviewers', 'N/A'))
-                st.metric("Average Review Stars", f"{profile.get('avg_review_stars', 'N/A'):.2f}")
-                st.metric("Latitude", f"{profile.get('latitude', 'N/A'):.4f}")
-                st.metric("Longitude", f"{profile.get('longitude', 'N/A'):.4f}")
-    
-    elif page == "Recommendation System":
-        st.header("Business Recommendations")
-        
-        # Get list of users
-        users = list(explorer.user_details.keys())
-        selected_user_id = st.selectbox("Select a User", users)
-        
-        if selected_user_id:
-            # Get recommendations
-            recommendations = explorer.get_recommendations(selected_user_id)
-            
-            st.subheader(f"Top Recommendations for {explorer.get_user_name(selected_user_id)}")
-            
-            # Display recommendations
-            for i, business_id in enumerate(recommendations, 1):
-                business_info = explorer.get_business_info(business_id)
-                st.write(f"{i}. {business_info['name']} (City: {business_info['city']})")
-    
-    # Footer
-    st.sidebar.markdown("---")
-    st.sidebar.info("Powered by Graph Neural Network Recommendation System")
+    # Close resources
+    inference.close()
 
 if __name__ == "__main__":
     main()
