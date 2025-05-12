@@ -1,19 +1,14 @@
 import os
+import sys
 import streamlit as st
 import torch
 import pandas as pd
-import sys
 
 # Add the project directory to the Python path
 project_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(project_dir)
 
 from inference import YelpRecommendationInference
-
-# Neo4j connection configuration
-NEO4J_URI = "bolt://localhost:7687"  # Update if your Neo4j instance is hosted elsewhere
-NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "password"  # Change this to your actual password
 
 # Cached model path
 MODEL_PATH = os.path.join(project_dir, 'checkpoints', 'best_model.pt')
@@ -28,11 +23,20 @@ def get_user_list():
             query = """
             MATCH (u:User)
             RETURN u.user_id AS user_id, 
-                   u.name AS name 
-            LIMIT 100  # Limit to prevent overwhelming the dropdown
+                   u.name AS name,
+                   u.review_count AS review_count
+            ORDER BY u.review_count DESC
+            LIMIT 100  
             """
             result = session.run(query)
-            users = [{'user_id': record['user_id'], 'name': record['name'] or record['user_id']} for record in result]
+            users = [
+                {
+                    'user_id': record['user_id'], 
+                    'name': record['name'] or record['user_id'],
+                    'review_count': record['review_count']
+                } 
+                for record in result
+            ]
     finally:
         inference.close()
     
@@ -47,29 +51,97 @@ def get_business_list():
             query = """
             MATCH (b:Business)
             RETURN b.business_id AS business_id, 
-                   b.name AS name 
-            LIMIT 100  # Limit to prevent overwhelming the dropdown
+                   b.name AS name,
+                   b.review_count AS review_count
+            ORDER BY b.review_count DESC
+            LIMIT 100
             """
             result = session.run(query)
-            businesses = [{'business_id': record['business_id'], 'name': record['name'] or record['business_id']} for record in result]
+            businesses = [
+                {
+                    'business_id': record['business_id'], 
+                    'name': record['name'] or record['business_id'],
+                    'review_count': record['review_count']
+                } 
+                for record in result
+            ]
     finally:
         inference.close()
     
     return businesses
 
+def display_recommendations(recommendations, recommendation_type):
+    """
+    Display recommendations in a styled Streamlit layout.
+    
+    Args:
+        recommendations: DataFrame of recommendations
+        recommendation_type: 'recommendations' or 'similar_businesses'
+    """
+    # Create a container for recommendations
+    st.markdown("### 🌟 Recommendations")
+    
+    # Check if recommendations are empty
+    if len(recommendations) == 0:
+        st.warning("No recommendations found.")
+        return
+    
+    # Determine the column names based on recommendation type
+    score_column = 'predicted_score' if recommendation_type == 'recommendations' else 'similarity'
+    
+    # Create individual cards for each recommendation
+    for _, row in recommendations.iterrows():
+        with st.container():
+            # Business name as header
+            st.markdown(f"### {row['name']}")
+            
+            # Create columns for details
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                # Basic business info
+                st.metric("Stars", f"{row.get('stars', 'N/A'):.1f}")
+            
+            with col2:
+                # Review count
+                st.metric("Review Count", row.get('review_count', 'N/A'))
+            
+            with col3:
+                # Recommendation score
+                st.metric(
+                    "Score" if recommendation_type == 'recommendations' else "Similarity", 
+                    f"{row[score_column]:.2f}"
+                )
+            
+            # Business categories
+            st.markdown(f"**Categories:** {row.get('categories', 'N/A')}")
+            
+            # Separator
+            st.markdown("---")
+
 def main():
     # Set page configuration
-    st.set_page_config(page_title="Yelp Recommendation System", page_icon=":star:", layout="wide")
+    st.set_page_config(
+        page_title="Yelp Recommendation System", 
+        page_icon="🍽️", 
+        layout="wide"
+    )
     
-    # Title
-    st.title("🌟 Yelp Recommendation System")
+    # Title and description
+    st.title("🍽️ Yelp Business Recommendation System")
+    st.markdown("""
+    Discover personalized business recommendations and find similar businesses 
+    using advanced Graph Neural Network (GNN) techniques.
+    """)
     
     # Sidebar for navigation
-    st.sidebar.header("Recommendation Options")
+    st.sidebar.header("🔍 Recommendation Options")
     
     # Choose recommendation type
-    rec_type = st.sidebar.radio("Select Recommendation Type", 
-                                ["User Recommendations", "Similar Businesses"])
+    rec_type = st.sidebar.radio(
+        "Select Recommendation Type", 
+        ["User Recommendations", "Similar Businesses"]
+    )
     
     # Load users and businesses
     try:
@@ -88,21 +160,22 @@ def main():
     
     # User Recommendations
     if rec_type == "User Recommendations":
-        st.subheader("Get Personalized Business Recommendations")
-        
-        # User selection
-        user_options = {user['user_id']: user['name'] for user in users}
-        selected_user_id = st.selectbox(
+        # Create user selection with additional info
+        user_options = {
+            user['user_id']: f"{user['name']} (Reviews: {user['review_count']})" 
+            for user in users
+        }
+        selected_user_id = st.sidebar.selectbox(
             "Select a User", 
             list(user_options.keys()), 
             format_func=lambda x: user_options.get(x, x)
         )
         
         # Number of recommendations
-        top_k = st.slider("Number of Recommendations", 5, 20, 10)
+        top_k = st.sidebar.slider("Number of Recommendations", 5, 20, 10)
         
         # Generate recommendations button
-        if st.button("Get Recommendations"):
+        if st.sidebar.button("Get Recommendations"):
             try:
                 # Get recommendations
                 recommendations = inference.get_recommendations(
@@ -110,39 +183,35 @@ def main():
                     top_k=top_k
                 )
                 
-                # Display recommendations
-                st.subheader(f"Top {top_k} Recommendations for {user_options.get(selected_user_id, selected_user_id)}")
+                # Display user details
+                user_details = next(user for user in users if user['user_id'] == selected_user_id)
+                st.markdown(f"### 👤 User: {user_details['name']}")
+                st.markdown(f"**Total Reviews:** {user_details['review_count']}")
                 
-                # Create columns for recommendations
-                for _, row in recommendations.iterrows():
-                    with st.container():
-                        st.markdown(f"**{row['name']}**")
-                        st.markdown(f"Stars: {row.get('stars', 'N/A')}")
-                        st.markdown(f"Review Count: {row.get('review_count', 'N/A')}")
-                        st.markdown(f"Categories: {row.get('categories', 'N/A')}")
-                        st.markdown(f"Predicted Score: {row['predicted_score']:.2f}")
-                        st.markdown("---")
+                # Display recommendations
+                display_recommendations(recommendations, 'recommendations')
             
             except Exception as e:
                 st.error(f"Error generating recommendations: {e}")
     
     # Similar Businesses
     else:
-        st.subheader("Find Similar Businesses")
-        
-        # Business selection
-        business_options = {business['business_id']: business['name'] for business in businesses}
-        selected_business_id = st.selectbox(
+        # Create business selection with additional info
+        business_options = {
+            business['business_id']: f"{business['name']} (Reviews: {business['review_count']})" 
+            for business in businesses
+        }
+        selected_business_id = st.sidebar.selectbox(
             "Select a Business", 
             list(business_options.keys()), 
             format_func=lambda x: business_options.get(x, x)
         )
         
         # Number of similar businesses
-        top_k = st.slider("Number of Similar Businesses", 5, 20, 10)
+        top_k = st.sidebar.slider("Number of Similar Businesses", 5, 20, 10)
         
         # Generate similar businesses button
-        if st.button("Find Similar Businesses"):
+        if st.sidebar.button("Find Similar Businesses"):
             try:
                 # Get similar businesses
                 similar_businesses = inference.get_similar_businesses(
@@ -150,18 +219,14 @@ def main():
                     top_k=top_k
                 )
                 
-                # Display similar businesses
-                st.subheader(f"Top {top_k} Businesses Similar to {business_options.get(selected_business_id, selected_business_id)}")
+                # Display base business details
+                base_business = next(business for business in businesses if business['business_id'] == selected_business_id)
+                st.markdown(f"### 🏢 Base Business: {base_business['name']}")
+                st.markdown(f"**Total Reviews:** {base_business['review_count']}")
+                st.markdown(f"**Categories:** {base_business.get('categories', 'N/A')}")
                 
-                # Create columns for similar businesses
-                for _, row in similar_businesses.iterrows():
-                    with st.container():
-                        st.markdown(f"**{row['name']}**")
-                        st.markdown(f"Stars: {row.get('stars', 'N/A')}")
-                        st.markdown(f"Review Count: {row.get('review_count', 'N/A')}")
-                        st.markdown(f"Categories: {row.get('categories', 'N/A')}")
-                        st.markdown(f"Similarity Score: {row['similarity']:.2f}")
-                        st.markdown("---")
+                # Display similar businesses
+                display_recommendations(similar_businesses, 'similar_businesses')
             
             except Exception as e:
                 st.error(f"Error finding similar businesses: {e}")
