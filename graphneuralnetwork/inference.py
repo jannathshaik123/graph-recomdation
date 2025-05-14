@@ -8,7 +8,10 @@ from model import YelpGNN, YelpRecommender
 from data import Neo4jDataLoader
 
 NEO4J_URI = "bolt://localhost:7687"
+NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
+NEO4J_PASSWORD = "password"
+ 
 NEO4J_PASSWORD = "password"
  
 class YelpRecommendationInference:
@@ -41,6 +44,7 @@ class YelpRecommendationInference:
         self.graph_data = self.graph_data.to(device)
         
                 self.model = self._load_model()
+                self.model = self._load_model()
         self.model.to(device)
         self.model.eval()
         
@@ -49,10 +53,13 @@ class YelpRecommendationInference:
     def _load_model(self):
         """Load the trained model from checkpoint."""
                 checkpoint = torch.load(self.model_path, map_location=self.device)
+                checkpoint = torch.load(self.model_path, map_location=self.device)
         
+                if 'model_params' in checkpoint:
                 if 'model_params' in checkpoint:
             model_params = checkpoint['model_params']
         else:
+                        model_params = {
                         model_params = {
                 'input_dim': self.graph_data.x.size(1),
                 'hidden_dim': 64,
@@ -64,6 +71,7 @@ class YelpRecommendationInference:
                 'batch_norm': True
             }
         
+                gnn_model = YelpGNN(
                 gnn_model = YelpGNN(
             input_dim=model_params['input_dim'],
             hidden_dim=model_params['hidden_dim'],
@@ -77,6 +85,7 @@ class YelpRecommendationInference:
         
         model = YelpRecommender(gnn_model)
         
+                model.load_state_dict(checkpoint['model_state_dict'])
                 model.load_state_dict(checkpoint['model_state_dict'])
         print(f"Model loaded from {self.model_path}")
         
@@ -95,10 +104,13 @@ class YelpRecommendationInference:
             DataFrame containing recommended businesses with scores
         """
                 if user_id not in self.node_mapping:
+                if user_id not in self.node_mapping:
             raise ValueError(f"User ID {user_id} not found in the graph")
         
                 user_idx = self.node_mapping[user_id]
+                user_idx = self.node_mapping[user_id]
         
+                rated_businesses = set()
                 rated_businesses = set()
         if filter_rated:
             with self.data_loader.driver.session() as session:
@@ -110,36 +122,50 @@ class YelpRecommendationInference:
                 rated_businesses = {record['business_id'] for record in result}
         
                 business_indices = [idx for idx, node_type in self.node_types.items() 
+                business_indices = [idx for idx, node_type in self.node_types.items() 
                            if node_type == 'business']
         
+                user_indices = [user_idx] * len(business_indices)
                 user_indices = [user_idx] * len(business_indices)
         
                 with torch.no_grad():
                         embeddings = self.model.gnn(self.graph_data.x, self.graph_data.edge_index)
+                with torch.no_grad():
+                        embeddings = self.model.gnn(self.graph_data.x, self.graph_data.edge_index)
             
+                        user_embed = embeddings[user_idx]
                         user_embed = embeddings[user_idx]
             
                         business_embeds = embeddings[business_indices]
+                        business_embeds = embeddings[business_indices]
             
+                        batch_size = 1024
                         batch_size = 1024
             all_scores = []
             
             for i in range(0, len(business_indices), batch_size):
                                 batch_embeds = business_embeds[i:i+batch_size]
+                                batch_embeds = business_embeds[i:i+batch_size]
                 
+                                batch_user_embeds = user_embed.unsqueeze(0).expand(batch_embeds.size(0), -1)
                                 batch_user_embeds = user_embed.unsqueeze(0).expand(batch_embeds.size(0), -1)
                 
                                 pair_embeds = torch.cat([batch_user_embeds, batch_embeds], dim=1)
+                                pair_embeds = torch.cat([batch_user_embeds, batch_embeds], dim=1)
                 
+                                batch_scores = self.model.predictor(pair_embeds).squeeze()
                                 batch_scores = self.model.predictor(pair_embeds).squeeze()
                 all_scores.append(batch_scores)
             
                         scores = torch.cat(all_scores).cpu().numpy()
+                        scores = torch.cat(all_scores).cpu().numpy()
         
+                recommendations = []
                 recommendations = []
         for i, business_idx in enumerate(business_indices):
             business_id = self.reverse_mapping[business_idx]
             
+                        if filter_rated and business_id in rated_businesses:
                         if filter_rated and business_id in rated_businesses:
                 continue
                 
@@ -149,9 +175,12 @@ class YelpRecommendationInference:
             })
         
                 df_recommendations = pd.DataFrame(recommendations)
+                df_recommendations = pd.DataFrame(recommendations)
         
                 df_recommendations = df_recommendations.sort_values('score', ascending=False).head(top_k)
+                df_recommendations = df_recommendations.sort_values('score', ascending=False).head(top_k)
         
+                df_recommendations = self._enrich_business_data(df_recommendations)
                 df_recommendations = self._enrich_business_data(df_recommendations)
         
         return df_recommendations
@@ -160,6 +189,7 @@ class YelpRecommendationInference:
         """Add additional business information to recommendations."""
         business_ids = df_recommendations['business_id'].tolist()
         
+                with self.data_loader.driver.session() as session:
                 with self.data_loader.driver.session() as session:
             query = """
             MATCH (b:Business)
@@ -173,6 +203,7 @@ class YelpRecommendationInference:
             result = session.run(query, business_ids=business_ids)
             
                         business_info = {}
+                        business_info = {}
             for record in result:
                 business_info[record['business_id']] = {
                     'name': record['name'],
@@ -182,6 +213,7 @@ class YelpRecommendationInference:
                 }
         
                 enriched_data = []
+                enriched_data = []
         for _, row in df_recommendations.iterrows():
             business_id = row['business_id']
             data = {
@@ -189,6 +221,7 @@ class YelpRecommendationInference:
                 'predicted_score': row[score_col]
             }
             
+                        if business_id in business_info:
                         if business_id in business_info:
                 data.update(business_info[business_id])
                 
@@ -208,23 +241,32 @@ class YelpRecommendationInference:
             DataFrame containing similar businesses with similarity scores
         """
                 if business_id not in self.node_mapping:
+                if business_id not in self.node_mapping:
             raise ValueError(f"Business ID {business_id} not found in the graph")
         
                 business_idx = self.node_mapping[business_id]
+                business_idx = self.node_mapping[business_id]
         
+                business_indices = [idx for idx, node_type in self.node_types.items() 
                 business_indices = [idx for idx, node_type in self.node_types.items() 
                            if node_type == 'business' and idx != business_idx]
         
                 with torch.no_grad():
                         embeddings = self.model.gnn(self.graph_data.x, self.graph_data.edge_index)
+                with torch.no_grad():
+                        embeddings = self.model.gnn(self.graph_data.x, self.graph_data.edge_index)
             
+                        query_embed = embeddings[business_idx]
                         query_embed = embeddings[business_idx]
             
                         business_embeds = embeddings[business_indices]
+                        business_embeds = embeddings[business_indices]
             
+                        similarity = torch.nn.functional.cosine_similarity(query_embed.unsqueeze(0), business_embeds)
                         similarity = torch.nn.functional.cosine_similarity(query_embed.unsqueeze(0), business_embeds)
             similarity = similarity.cpu().numpy()
         
+                similar_businesses = []
                 similar_businesses = []
         for i, other_idx in enumerate(business_indices):
             other_id = self.reverse_mapping[other_idx]
@@ -234,9 +276,12 @@ class YelpRecommendationInference:
             })
         
                 df_similar = pd.DataFrame(similar_businesses)
+                df_similar = pd.DataFrame(similar_businesses)
         
                 df_similar = df_similar.sort_values('similarity', ascending=False).head(top_k)
+                df_similar = df_similar.sort_values('similarity', ascending=False).head(top_k)
         
+                df_similar = self._enrich_business_data(df_similar, score_col='similarity')
                 df_similar = self._enrich_business_data(df_similar, score_col='similarity')
         df_similar = df_similar.rename(columns={'predicted_score': 'similarity'})
         
@@ -253,8 +298,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Yelp GNN Recommendation Inference')
     
         parser.add_argument('--model_path', type=str, required=True, 
+        parser.add_argument('--model_path', type=str, required=True, 
                         help='Path to the trained model checkpoint')
     
+        parser.add_argument('--cache_dir', type=str, default='cache',
         parser.add_argument('--cache_dir', type=str, default='cache',
                         help='Directory containing cached data')
     parser.add_argument('--top_k', type=int, default=10,
@@ -277,12 +324,14 @@ def main():
     args = parse_args()
     
         inference = YelpRecommendationInference(
+        inference = YelpRecommendationInference(
         model_path=args.model_path,
         cache_dir=args.cache_dir,
         device=args.device
     )
     
     try:
+                if args.user_id:
                 if args.user_id:
             print(f"Generating recommendations for user {args.user_id}")
             recommendations = inference.get_recommendations(
@@ -293,9 +342,11 @@ def main():
             print(recommendations)
             
                         if args.output:
+                        if args.output:
                 recommendations.to_csv(args.output, index=False)
                 print(f"Recommendations saved to {args.output}")
         
+                elif args.business_id:
                 elif args.business_id:
             print(f"Finding similar businesses to {args.business_id}")
             similar = inference.get_similar_businesses(
@@ -306,6 +357,7 @@ def main():
             print(similar)
             
                         if args.output:
+                        if args.output:
                 similar.to_csv(args.output, index=False)
                 print(f"Similar businesses saved to {args.output}")
         
@@ -313,6 +365,7 @@ def main():
             print("Please provide either --user_id or --business_id")
     
     finally:
+                inference.close()
                 inference.close()
 
 
