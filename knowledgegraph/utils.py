@@ -10,7 +10,7 @@ from datetime import datetime
 from math import sqrt
 from collections import defaultdict
 
-# Neo4j connection configuration
+
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "password"
@@ -118,25 +118,25 @@ class YelpRecommendationSystem:
 
     def collaborative_filtering_recommendations(self, user_id, k=10, top_n=10):
         """Get recommendations using user-based collaborative filtering"""
-        # Step 1: Get target user's reviews
+        
         user_reviews = self.get_user_ratings(user_id)
         if not user_reviews:
             return []
         
-        # Create a dictionary of businesses the user has already reviewed
+        
         user_businesses = {r['business_id']: r['rating'] for r in user_reviews}
         
-        # Step 2: Find similar users who have reviewed common businesses
+        
         similar_users = self.get_similar_users(user_id, min_common=1, limit=k*3)
         
-        # Step 3: Get recommendations from similar users
+        
         recommendations = defaultdict(lambda: {'sum_sim': 0, 'weighted_sum': 0})
         
         with self.driver.session() as session:
             for sim_user in similar_users:
                 sim_user_id = sim_user['user_id']
                 
-                # Get the review overlap to calculate similarity
+                
                 query = """
                 MATCH (u1:User {user_id: $user_id})-[:WROTE]->(r1:Review)-[:ABOUT]->(b:Business)
                 MATCH (u2:User {user_id: $sim_user_id})-[:WROTE]->(r2:Review)-[:ABOUT]->(b)
@@ -149,7 +149,7 @@ class YelpRecommendationSystem:
                 if not common_ratings:
                     continue
                 
-                # Calculate Pearson similarity
+                
                 u1_ratings = [r[1] for r in common_ratings]
                 u2_ratings = [r[2] for r in common_ratings]
                 
@@ -164,17 +164,17 @@ class YelpRecommendationSystem:
                     denominator1 = sqrt(sum((r1 - u1_mean) ** 2 for r1 in u1_ratings))
                     denominator2 = sqrt(sum((r2 - u2_mean) ** 2 for r2 in u2_ratings))
                     
-                    # Avoid division by zero
+                    
                     if denominator1 == 0 or denominator2 == 0:
                         similarity = 0
                     else:
                         similarity = numerator / (denominator1 * denominator2)
                     
-                    # Adjust for negative correlations and low similarity
+                    
                     if similarity <= 0:
                         continue
                         
-                    # Get businesses that similar user has rated but target user hasn't
+                    
                     query = """
                     MATCH (u:User {user_id: $sim_user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
                     WHERE NOT EXISTS {
@@ -184,7 +184,7 @@ class YelpRecommendationSystem:
                     """
                     result = session.run(query, user_id=user_id, sim_user_id=sim_user_id)
                     
-                    # Add weighted ratings to recommendations
+                    
                     for record in result:
                         business_id = record['business_id']
                         rating = record['rating']
@@ -196,26 +196,26 @@ class YelpRecommendationSystem:
                     print(f"Error calculating similarity: {e}")
                     continue
         
-        # Calculate predicted ratings and create recommendation list
+        
         recommendation_list = []
         for business_id, values in recommendations.items():
             if values['sum_sim'] > 0:
                 predicted_rating = values['weighted_sum'] / values['sum_sim']
                 
-                # Get business details
+                
                 business_details = self.get_business_details(business_id)
                 if business_details:
                     business_details['predicted_rating'] = predicted_rating
                     recommendation_list.append(business_details)
         
-        # Sort by predicted rating and return top N
+        
         recommendation_list.sort(key=lambda x: x['predicted_rating'], reverse=True)
         return recommendation_list[:top_n]
     
     def content_based_recommendations(self, user_id, top_n=10):
         """Get recommendations based on business categories and user preferences"""
         with self.driver.session() as session:
-            # Get user's category preferences
+            
             query = """
             MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)-[:IN_CATEGORY]->(c:Category)
             WITH u, c, avg(r.stars) AS avg_rating
@@ -229,7 +229,7 @@ class YelpRecommendationSystem:
             if not preferred_categories:
                 return []
             
-            # Find businesses in preferred categories that the user hasn't reviewed
+            
             top_categories = preferred_categories[:min(5, len(preferred_categories))]
             category_params = {f"category{i}": category for i, category in enumerate(top_categories)}
             
@@ -259,13 +259,13 @@ class YelpRecommendationSystem:
             for record in result:
                 business = dict(record)
                 
-                # Calculate a score based on category match and ratings
+                
                 category_match_score = sum(1 for cat in business['categories'] if cat in preferred_categories)
                 business['score'] = (category_match_score * 0.7) + (business['avg_rating'] * 0.3)
                 
                 recommendations.append(business)
             
-            # Sort by score and return top N
+            
             recommendations.sort(key=lambda x: x['score'], reverse=True)
             return recommendations[:top_n]
     
@@ -274,10 +274,10 @@ class YelpRecommendationSystem:
         cf_recs = self.collaborative_filtering_recommendations(user_id, top_n=top_n)
         cb_recs = self.content_based_recommendations(user_id, top_n=top_n)
         
-        # Create a map of business_id to recommendation
+        
         all_recs = {}
         
-        # Add collaborative filtering recommendations with weight
+        
         for rec in cf_recs:
             all_recs[rec['business_id']] = {
                 'business_id': rec['business_id'],
@@ -289,7 +289,7 @@ class YelpRecommendationSystem:
                 'avg_stars': rec['avg_stars']
             }
         
-        # Add content-based recommendations with weight
+        
         for rec in cb_recs:
             if rec['business_id'] in all_recs:
                 all_recs[rec['business_id']]['cb_score'] = rec['score']
@@ -300,31 +300,31 @@ class YelpRecommendationSystem:
                     'cf_score': 0,
                     'cb_score': rec['score'],
                     'categories': rec['categories'],
-                    'city': None,  # Content-based query might not include city
+                    'city': None,  
                     'avg_stars': rec['avg_rating']
                 }
         
-        # Calculate hybrid score and create final list
+        
         hybrid_recs = []
         for business_id, rec in all_recs.items():
-            # Normalize scores (assuming 5-star rating system)
-            norm_cf = rec['cf_score'] / 5.0 if rec['cf_score'] > 0 else 0
-            norm_cb = rec['cb_score'] / (1.0 + 5.0) if rec['cb_score'] > 0 else 0  # Normalize based on max possible score
             
-            # Calculate hybrid score with weights
+            norm_cf = rec['cf_score'] / 5.0 if rec['cf_score'] > 0 else 0
+            norm_cb = rec['cb_score'] / (1.0 + 5.0) if rec['cb_score'] > 0 else 0  
+            
+            
             hybrid_score = (norm_cf * 0.6) + (norm_cb * 0.4)
             
             rec['hybrid_score'] = hybrid_score
-            rec['predicted_rating'] = hybrid_score * 5  # Scale back to 5-star rating
+            rec['predicted_rating'] = hybrid_score * 5  
             hybrid_recs.append(rec)
         
-        # Sort by hybrid score and return top N
+        
         hybrid_recs.sort(key=lambda x: x['hybrid_score'], reverse=True)
         return hybrid_recs[:top_n]
     
     def baseline_predict(self, user_id, business_id):
         """Baseline prediction model using global, user, and item biases"""
-        # Get global average rating
+        
         with self.driver.session() as session:
             query = """
             MATCH ()-[:WROTE]->(r:Review)
@@ -334,62 +334,62 @@ class YelpRecommendationSystem:
             record = result.single()
             global_avg = record["global_avg"] if record else 3.0
         
-        # Get user bias (difference from global average)
+        
         user_avg = self.get_user_average_rating(user_id)
         user_bias = user_avg - global_avg
         
-        # Get business bias (difference from global average)
+        
         business_avg = self.get_business_average_rating(business_id)
         business_bias = business_avg - global_avg
         
-        # Predict rating: global average + user bias + business bias
+        
         predicted_rating = global_avg + user_bias + business_bias
         
-        # Clip to valid rating range [1, 5]
+        
         return max(1.0, min(5.0, predicted_rating))
     
     def matrix_factorization_predict(self, user_id, business_id, user_factors, business_factors):
         """Predict rating using pre-computed matrix factorization factors"""
         if user_id in user_factors and business_id in business_factors:
-            # Dot product of user and business factors
+            
             prediction = np.dot(user_factors[user_id], business_factors[business_id])
-            # Clip to valid rating range
+            
             return max(1.0, min(5.0, prediction))
         else:
-            # Fall back to baseline predictor if factors not available
+            
             return self.baseline_predict(user_id, business_id)
     
     def train_matrix_factorization(self, num_factors=20, learning_rate=0.005, regularization=0.02, num_iterations=50, sample_size=50000):
         """Train a matrix factorization model and return user and business factors"""
         print("Training matrix factorization model...")
         
-        # Get sample of reviews for training
+        
         reviews = self.get_all_user_reviews(limit=sample_size)
         if not reviews:
             print("No reviews found for training.")
             return {}, {}
         
-        # Create user and business dictionaries
+        
         users = set(review['user_id'] for review in reviews)
         businesses = set(review['business_id'] for review in reviews)
         
-        # Create index mappings
+        
         user_to_idx = {user_id: i for i, user_id in enumerate(users)}
         business_to_idx = {business_id: i for i, business_id in enumerate(businesses)}
         
-        # Initialize factor matrices
+        
         num_users = len(users)
         num_businesses = len(businesses)
         
-        # Initialize with small random values
+        
         np.random.seed(42)
         user_factors = np.random.normal(0, 0.1, (num_users, num_factors))
         business_factors = np.random.normal(0, 0.1, (num_businesses, num_factors))
         
-        # Calculate global average rating
+        
         global_avg = sum(review['rating'] for review in reviews) / len(reviews)
         
-        # Calculate user and business biases
+        
         user_biases = np.zeros(num_users)
         business_biases = np.zeros(num_businesses)
         
@@ -414,9 +414,9 @@ class YelpRecommendationSystem:
             if count > 0:
                 business_biases[business_idx] /= count
         
-        # Train using SGD
+        
         for iteration in range(num_iterations):
-            # Shuffle reviews for stochastic updates
+            
             np.random.shuffle(reviews)
             
             total_error = 0
@@ -425,19 +425,19 @@ class YelpRecommendationSystem:
                 user_idx = user_to_idx[review['user_id']]
                 business_idx = business_to_idx[review['business_id']]
                 
-                # Predict current rating
+                
                 predicted = global_avg + user_biases[user_idx] + business_biases[business_idx] + \
                            np.dot(user_factors[user_idx], business_factors[business_idx])
                 
-                # Calculate error
+                
                 error = review['rating'] - predicted
                 total_error += error ** 2
                 
-                # Update biases
+                
                 user_biases[user_idx] += learning_rate * (error - regularization * user_biases[user_idx])
                 business_biases[business_idx] += learning_rate * (error - regularization * business_biases[business_idx])
                 
-                # Update factors
+                
                 user_factors_grad = error * business_factors[business_idx] - regularization * user_factors[user_idx]
                 business_factors_grad = error * user_factors[user_idx] - regularization * business_factors[business_idx]
                 
@@ -448,11 +448,11 @@ class YelpRecommendationSystem:
             if iteration % 10 == 0:
                 print(f"Iteration {iteration}, RMSE: {rmse:.4f}")
         
-        # Create dictionaries to map user_id and business_id to factors
+        
         user_factors_dict = {user_id: user_factors[user_to_idx[user_id]] for user_id in users}
         business_factors_dict = {business_id: business_factors[business_to_idx[business_id]] for business_id in businesses}
         
-        # Include biases in factors
+        
         for user_id in users:
             user_idx = user_to_idx[user_id]
             user_factors_dict[user_id] = np.append(user_factors_dict[user_id], [user_biases[user_idx]])
@@ -470,47 +470,47 @@ class YelpRecommendationSystem:
             print("No test data available for evaluation.")
             return {}
         
-        # Initialize metrics
+        
         metrics = {
             'baseline': {'mae': 0, 'rmse': 0, 'count': 0},
             'matrix_factorization': {'mae': 0, 'rmse': 0, 'count': 0}
         }
         
-        # Calculate metrics
+        
         for record in test_set:
             user_id = record['user_id']
             business_id = record['business_id']
             actual_rating = record['rating']
             
-            # Baseline prediction
+            
             baseline_pred = self.baseline_predict(user_id, business_id)
             baseline_error = abs(actual_rating - baseline_pred)
             metrics['baseline']['mae'] += baseline_error
             metrics['baseline']['rmse'] += baseline_error ** 2
             metrics['baseline']['count'] += 1
             
-            # Matrix factorization prediction
+            
             if user_factors and business_factors and user_id in user_factors and business_id in business_factors:
                 user_vector = user_factors[user_id]
                 business_vector = business_factors[business_id]
                 
-                # Extract bias terms (last element of vectors)
+                
                 user_bias = user_vector[-1]
                 business_bias = business_vector[-1]
                 
-                # Dot product of feature vectors
+                
                 dot_product = np.dot(user_vector[:-1], business_vector[:-1])
                 
-                # Final prediction
+                
                 mf_pred = global_avg + user_bias + business_bias + dot_product
-                mf_pred = max(1.0, min(5.0, mf_pred))  # Clip to valid range
+                mf_pred = max(1.0, min(5.0, mf_pred))  
                 
                 mf_error = abs(actual_rating - mf_pred)
                 metrics['matrix_factorization']['mae'] += mf_error
                 metrics['matrix_factorization']['rmse'] += mf_error ** 2
                 metrics['matrix_factorization']['count'] += 1
         
-        # Calculate final metrics
+        
         for model in metrics:
             count = metrics[model]['count']
             if count > 0:
@@ -526,35 +526,35 @@ class YelpRecommendationSystem:
         """Split data into training and test sets"""
         print("Splitting data into training and test sets...")
         
-        # Get all reviews
+        
         all_reviews = self.get_all_user_reviews(limit=sample_size)
         if not all_reviews:
             print("No reviews found.")
             return [], []
         
-        # Create a dataframe for easier manipulation
+        
         df = pd.DataFrame(all_reviews)
         
-        # Convert date strings to datetime objects for sorting
+        
         df['date'] = pd.to_datetime(df['date'])
         
-        # Get users with minimum number of reviews
+        
         user_counts = df['user_id'].value_counts()
         valid_users = user_counts[user_counts >= min_reviews].index.tolist()
         
-        # Filter reviews for valid users
+        
         df_valid = df[df['user_id'].isin(valid_users)]
         
-        # Sort by date for each user
+        
         df_valid = df_valid.sort_values(['user_id', 'date'])
         
-        # Group by user_id
+        
         grouped = df_valid.groupby('user_id')
         
         train_set = []
         test_set = []
         
-        # For each user, take the most recent reviews as test set
+        
         for user_id, group in grouped:
             n_reviews = len(group)
             n_test = max(1, int(n_reviews * test_size))
@@ -570,36 +570,36 @@ class YelpRecommendationSystem:
     
     def save_matrix_factorization_model(self, user_factors, business_factors, global_avg, model_dir="models"):
         """Save trained matrix factorization model to files"""
-        # Create models directory if it doesn't exist
+        
         os.makedirs(model_dir, exist_ok=True)
         
-        # Generate timestamp for model versioning
+        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Save user factors
+        
         user_factors_file = os.path.join(model_dir, f"user_factors_{timestamp}.pkl")
         with open(user_factors_file, 'wb') as f:
             pickle.dump(user_factors, f)
         
-        # Save business factors
+        
         business_factors_file = os.path.join(model_dir, f"business_factors_{timestamp}.pkl")
         with open(business_factors_file, 'wb') as f:
             pickle.dump(business_factors, f)
         
-        # Save global average and metadata
+        
         metadata = {
             "global_avg": global_avg,
             "timestamp": timestamp,
             "num_users": len(user_factors),
             "num_businesses": len(business_factors),
-            "factors_shape": next(iter(user_factors.values())).shape[0] - 1  # -1 for bias term
+            "factors_shape": next(iter(user_factors.values())).shape[0] - 1  
         }
         
         metadata_file = os.path.join(model_dir, f"mf_metadata_{timestamp}.json")
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f)
         
-        # Save latest model info for easy loading
+        
         latest_info = {
             "timestamp": timestamp,
             "user_factors_file": user_factors_file,
@@ -616,13 +616,13 @@ class YelpRecommendationSystem:
 
     def load_matrix_factorization_model(self, model_dir="models", timestamp=None):
         """Load trained matrix factorization model from files"""
-        # Check if models directory exists
+        
         if not os.path.exists(model_dir):
             print(f"Models directory {model_dir} not found.")
             return None, None, None
         
         try:
-            # If timestamp is not provided, load the latest model
+            
             if timestamp is None:
                 latest_file = os.path.join(model_dir, "latest_model.json")
                 if not os.path.exists(latest_file):
@@ -637,20 +637,20 @@ class YelpRecommendationSystem:
                 business_factors_file = latest_info["business_factors_file"]
                 metadata_file = latest_info["metadata_file"]
             else:
-                # Use the specified timestamp to locate files
+                
                 user_factors_file = os.path.join(model_dir, f"user_factors_{timestamp}.pkl")
                 business_factors_file = os.path.join(model_dir, f"business_factors_{timestamp}.pkl")
                 metadata_file = os.path.join(model_dir, f"mf_metadata_{timestamp}.json")
             
-            # Load user factors
+            
             with open(user_factors_file, 'rb') as f:
                 user_factors = pickle.load(f)
             
-            # Load business factors
+            
             with open(business_factors_file, 'rb') as f:
                 business_factors = pickle.load(f)
             
-            # Load metadata
+            
             with open(metadata_file, 'r') as f:
                 metadata = json.load(f)
             
@@ -670,7 +670,7 @@ class YelpRecommendationSystem:
             print(f"Models directory {model_dir} not found.")
             return []
         
-        # Find all metadata files
+        
         metadata_files = [f for f in os.listdir(model_dir) if f.startswith("mf_metadata_")]
         models = []
         
@@ -692,16 +692,16 @@ class YelpRecommendationSystem:
             except Exception as e:
                 print(f"Error reading metadata for {file}: {e}")
         
-        # Sort by timestamp (newest first)
+        
         models.sort(key=lambda x: x["timestamp"], reverse=True)
         return models
 
 def main():
-    # Create the recommendation system
+    
     recommender = YelpRecommendationSystem(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
     
     try:
-        # Check if there are any saved models
+        
         available_models = recommender.get_available_models()
         
         user_factors = None
@@ -713,30 +713,30 @@ def main():
             for i, model in enumerate(available_models):
                 print(f"{i+1}. Model from {model['timestamp']} - {model['num_users']} users, {model['num_businesses']} businesses")
             
-            # Option to load existing model or train new one
+            
             print("\nOptions:")
             print("1. Load the latest model")
             print("2. Train a new model")
             choice = input("Enter your choice (1 or 2): ")
             
             if choice == "1":
-                # Load the latest model
+                
                 user_factors, business_factors, global_avg = recommender.load_matrix_factorization_model()
             else:
                 print("Training new model...")
         else:
             print("No saved models found. Training new model...")
         
-        # If no model loaded, train a new one
+        
         if user_factors is None:
-            # Split data into training and test sets
+            
             train_set, test_set = recommender.split_train_test(test_size=0.2, min_reviews=3, sample_size=50000)
             
             if not train_set or not test_set:
                 print("Insufficient data for evaluation.")
                 return
             
-            # Train matrix factorization model
+            
             user_factors, business_factors, global_avg = recommender.train_matrix_factorization(
                 num_factors=15,
                 learning_rate=0.005,
@@ -745,34 +745,34 @@ def main():
                 sample_size=len(train_set)
             )
             
-            # Save the trained model
+            
             recommender.save_matrix_factorization_model(user_factors, business_factors, global_avg)
         else:
-            # Use the loaded model for evaluation
-            # We need to get test_set for evaluation
+            
+            
             _, test_set = recommender.split_train_test(test_size=0.2, min_reviews=3, sample_size=10000)
         
-        # Evaluate recommendation algorithms
+        
         print("\nEvaluating recommendation algorithms...")
         metrics = recommender.evaluate_recommendations(test_set, user_factors, business_factors, global_avg)
         
-        # Example: Get recommendations for a specific user
-        example_user_id = test_set[0]['user_id']  # Get a user from test set
+        
+        example_user_id = test_set[0]['user_id']  
         print(f"\nExample recommendations for user {example_user_id}:")
         
-        # Get collaborative filtering recommendations
+        
         print("\nCollaborative Filtering Recommendations:")
         cf_recs = recommender.collaborative_filtering_recommendations(example_user_id, top_n=5)
         for i, rec in enumerate(cf_recs):
             print(f"{i+1}. {rec['name']} - Predicted Rating: {rec['predicted_rating']:.2f} - Categories: {', '.join(rec['categories'][:3])}")
         
-        # Get content-based recommendations
+        
         print("\nContent-Based Recommendations:")
         cb_recs = recommender.content_based_recommendations(example_user_id, top_n=5)
         for i, rec in enumerate(cb_recs):
             print(f"{i+1}. {rec['name']} - Score: {rec['score']:.2f} - Categories: {', '.join(rec['categories'][:3])}")
         
-        # Get hybrid recommendations
+        
         print("\nHybrid Recommendations:")
         hybrid_recs = recommender.hybrid_recommendations(example_user_id, top_n=5)
         for i, rec in enumerate(hybrid_recs):

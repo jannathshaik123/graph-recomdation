@@ -26,9 +26,9 @@ class Neo4jDataLoader:
         self.batch_size = batch_size
         self.encoders = {}
         self.scalers = {}
-        self.node_mapping = {}  # Maps Neo4j node IDs to consecutive indices
-        self.reverse_mapping = {}  # Maps consecutive indices back to Neo4j node IDs
-        self.node_types = {}  # Maps indices to node types (user, business, etc.)
+        self.node_mapping = {}  
+        self.reverse_mapping = {}  
+        self.node_types = {}  
         
     def close(self):
         """Close the Neo4j connection."""
@@ -45,24 +45,24 @@ class Neo4jDataLoader:
         Returns:
             PyTorch Geometric Data object
         """
-        # Check if cached data exists
+        
         if cache_dir and os.path.exists(os.path.join(cache_dir, 'graph_data.pt')):
             print("Loading cached graph data...")
             return torch.load(os.path.join(cache_dir, 'graph_data.pt'))
         
         print("Loading graph data from Neo4j...")
         
-        # Node features and mappings
+        
         user_features, business_features = None, None
         if include_features:
             user_features, user_mapping = self._load_users()
             business_features, business_mapping = self._load_businesses()
             
-            # Combine mappings
+            
             user_offset = 0
             business_offset = len(user_mapping)
             
-            # Map Neo4j IDs to consecutive indices
+            
             for user_id, idx in user_mapping.items():
                 self.node_mapping[user_id] = idx
                 self.reverse_mapping[idx] = user_id
@@ -73,15 +73,15 @@ class Neo4jDataLoader:
                 self.reverse_mapping[idx + business_offset] = business_id
                 self.node_types[idx + business_offset] = 'business'
         
-        # Load edges (reviews)
+        
         edge_index, edge_attr = self._load_reviews()
         
-        # Combine features
+        
         if include_features:
             num_nodes = len(self.node_mapping)
             feature_dim = max(user_features.shape[1], business_features.shape[1])
             
-            # Pad features to the same dimension if needed
+            
             if user_features.shape[1] < feature_dim:
                 padding = np.zeros((user_features.shape[0], feature_dim - user_features.shape[1]))
                 user_features = np.hstack([user_features, padding])
@@ -89,16 +89,16 @@ class Neo4jDataLoader:
                 padding = np.zeros((business_features.shape[0], feature_dim - business_features.shape[1]))
                 business_features = np.hstack([business_features, padding])
 
-            # Calculate the actual number of users and businesses based on the mappings
+            
             num_users = len(user_mapping)
             num_businesses = len(business_mapping)
             
-            # Create x tensor with the correct sizes
+            
             x = np.zeros((num_users + num_businesses, feature_dim), dtype=np.float32)
             x[:num_users] = user_features
             
-            # Make sure we're only using the business features that correspond to businesses in the mapping
-            # This ensures we don't try to use more businesses than we have indices for
+            
+            
             if business_features.shape[0] > num_businesses:
                 print(f"Warning: Truncating business features from {business_features.shape[0]} to {num_businesses}")
                 business_features = business_features[:num_businesses]
@@ -109,12 +109,12 @@ class Neo4jDataLoader:
                 
             x[num_users:] = business_features
             
-            # Convert to torch tensor
+            
             x = torch.FloatTensor(x)
         else:
             x = None
         
-        # Create PyTorch Geometric Data object
+        
         data = Data(
             x=x,
             edge_index=torch.LongTensor(edge_index),
@@ -122,12 +122,12 @@ class Neo4jDataLoader:
             num_nodes=len(self.node_mapping) if include_features else None
         )
         
-        # Cache data if requested
+        
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
             torch.save(data, os.path.join(cache_dir, 'graph_data.pt'))
             
-            # Save mappings
+            
             torch.save({
                 'node_mapping': self.node_mapping,
                 'reverse_mapping': self.reverse_mapping,
@@ -143,11 +143,11 @@ class Neo4jDataLoader:
         user_mapping = {}
         
         with self.driver.session() as session:
-            # Count total users for progress reporting
+            
             total_users = session.run("MATCH (u:User) RETURN count(u) AS count").single()['count']
             print(f"Total users: {total_users}")
             
-            # Load users in batches
+            
             query = """
             MATCH (u:User)
             RETURN u.user_id AS user_id,
@@ -164,10 +164,10 @@ class Neo4jDataLoader:
                 
                 for j, record in enumerate(result):
                     user_id = record['user_id']
-                    # Map user ID to consecutive index
+                    
                     user_mapping[user_id] = i + j
                     
-                    # Extract numeric features
+                    
                     feature_vector = [
                         record['review_count'],
                         record['average_stars'],
@@ -179,10 +179,10 @@ class Neo4jDataLoader:
                 
                 print(f"Loaded {min(i + self.batch_size, total_users)}/{total_users} users")
         
-        # Convert features to numpy array
+        
         features = np.array(features, dtype=np.float32)
         
-        # Normalize features
+        
         if 'user' not in self.scalers:
             self.scalers['user'] = StandardScaler().fit(features)
         features = self.scalers['user'].transform(features)
@@ -196,11 +196,11 @@ class Neo4jDataLoader:
         business_mapping = {}
         
         with self.driver.session() as session:
-            # Count total businesses for progress reporting
+            
             total_businesses = session.run("MATCH (b:Business) RETURN count(b) AS count").single()['count']
             print(f"Total businesses: {total_businesses}")
             
-            # Load businesses in batches
+            
             query = """
             MATCH (b:Business)
             RETURN b.business_id AS business_id,
@@ -217,10 +217,10 @@ class Neo4jDataLoader:
                 
                 for j, record in enumerate(result):
                     business_id = record['business_id']
-                    # Map business ID to consecutive index
+                    
                     business_mapping[business_id] = i + j
                     
-                    # Extract numeric features
+                    
                     feature_vector = [
                         record['stars'],
                         record['review_count'],
@@ -232,10 +232,10 @@ class Neo4jDataLoader:
                 
                 print(f"Loaded {min(i + self.batch_size, total_businesses)}/{total_businesses} businesses")
         
-        # Convert features to numpy array
+        
         features = np.array(features, dtype=np.float32)
         
-        # Normalize features
+        
         if 'business' not in self.scalers:
             self.scalers['business'] = StandardScaler().fit(features)
         features = self.scalers['business'].transform(features)
@@ -249,11 +249,11 @@ class Neo4jDataLoader:
         edge_attr_list = []
         
         with self.driver.session() as session:
-            # Count total reviews for progress reporting
+            
             total_reviews = session.run("MATCH ()-[r:WROTE]->(:Review) RETURN count(r) AS count").single()['count']
             print(f"Total reviews: {total_reviews}")
             
-            # Load reviews in batches
+            
             query = """
             MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
             RETURN u.user_id AS user_id,
@@ -272,27 +272,27 @@ class Neo4jDataLoader:
                     user_id = record['user_id']
                     business_id = record['business_id']
                     
-                    # Skip if node not in mapping (should not happen if all nodes are loaded)
+                    
                     if user_id not in self.node_mapping or business_id not in self.node_mapping:
                         continue
                     
-                    # Add edges in both directions for undirected graph
+                    
                     user_idx = self.node_mapping[user_id]
                     business_idx = self.node_mapping[business_id]
                     
-                    # Edge: User -> Business
+                    
                     edge_list.append([user_idx, business_idx])
-                    # Edge: Business -> User (for undirected graph)
+                    
                     edge_list.append([business_idx, user_idx])
                     
-                    # Edge attributes (stars, votes)
+                    
                     edge_attr = [record['stars'], record['useful_votes'], record['funny_votes'], record['cool_votes']]
                     edge_attr_list.append(edge_attr)
-                    edge_attr_list.append(edge_attr)  # Duplicate for the undirected edge
+                    edge_attr_list.append(edge_attr)  
                 
                 print(f"Loaded {min(i + self.batch_size, total_reviews)}/{total_reviews} reviews")
         
-        # Convert to COO format for PyTorch Geometric
+        
         edge_index = np.array(edge_list).T
         edge_attr = np.array(edge_attr_list) if edge_attr_list else None
         
@@ -310,7 +310,7 @@ class Neo4jDataLoader:
         Returns:
             train_data, val_data, test_data: Training, validation, and test data tensors
         """
-        # Check if cached splits exist
+        
         if cache_dir:
             cache_path = os.path.join(cache_dir, f'splits_{test_size}_{negative_sampling_ratio}.pt')
             if os.path.exists(cache_path):
@@ -319,35 +319,35 @@ class Neo4jDataLoader:
         
         print("Creating train/test splits...")
         
-        # Load raw review data
+        
         reviews = self._load_raw_reviews()
         
-        # Split reviews into train, validation, and test sets
+        
         train_reviews, test_reviews = train_test_split(reviews, test_size=test_size, random_state=42)
         train_reviews, val_reviews = train_test_split(train_reviews, test_size=test_size, random_state=42)
         
-        # Create positive samples
+        
         train_data = self._create_samples(train_reviews, 1)
         val_data = self._create_samples(val_reviews, 1)
         test_data = self._create_samples(test_reviews, 1)
         
-        # Create negative samples
+        
         if negative_sampling_ratio > 0:
             train_neg = self._create_negative_samples(train_reviews, ratio=negative_sampling_ratio)
             val_neg = self._create_negative_samples(val_reviews, ratio=negative_sampling_ratio)
             test_neg = self._create_negative_samples(test_reviews, ratio=negative_sampling_ratio)
             
-            # Combine positive and negative samples
+            
             train_data = np.vstack([train_data, train_neg])
             val_data = np.vstack([val_data, val_neg])
             test_data = np.vstack([test_data, test_neg])
         
-        # Convert to PyTorch tensors
+        
         train_data = torch.LongTensor(train_data)
         val_data = torch.LongTensor(val_data)
         test_data = torch.LongTensor(test_data)
         
-        # Cache splits if requested
+        
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
             torch.save((train_data, val_data, test_data), cache_path)
@@ -373,7 +373,7 @@ class Neo4jDataLoader:
                 business_id = record['business_id']
                 stars = record['stars']
                 
-                # Skip if node not in mapping (should not happen if all nodes are loaded)
+                
                 if user_id not in self.node_mapping or business_id not in self.node_mapping:
                     continue
                 
@@ -395,30 +395,30 @@ class Neo4jDataLoader:
     
     def _create_negative_samples(self, reviews, ratio=1.0):
         """Create negative samples by randomly sampling unseen user-business pairs."""
-        # Get all users and businesses
+        
         users = set([user for user, _, _ in reviews])
         businesses = set([business for _, business, _ in reviews])
         
-        # Create set of existing user-business pairs
+        
         existing_pairs = set([(user, business) for user, business, _ in reviews])
         
-        # Calculate number of negative samples to generate
+        
         num_neg_samples = int(len(reviews) * ratio)
         
-        # Generate negative samples
+        
         neg_samples = []
         users_list = list(users)
         businesses_list = list(businesses)
         
         while len(neg_samples) < num_neg_samples:
-            # Randomly select a user and business
+            
             user_idx = np.random.choice(users_list)
             business_idx = np.random.choice(businesses_list)
             
-            # Check if this pair exists in the training data
+            
             if (user_idx, business_idx) not in existing_pairs:
-                neg_samples.append([user_idx, business_idx, 0, 0])  # 0 stars, 0 label
-                existing_pairs.add((user_idx, business_idx))  # Avoid duplicates
+                neg_samples.append([user_idx, business_idx, 0, 0])  
+                existing_pairs.add((user_idx, business_idx))  
         
         return np.array(neg_samples)
 
@@ -449,7 +449,7 @@ class YelpDataset(Dataset):
         """Get a sample from the dataset by index."""
         user_idx, business_idx, stars, label = self.split_data[idx]
         
-        # Create a new data object with the same graph structure
+        
         data = Data(
             x=self.graph_data.x,
             edge_index=self.graph_data.edge_index,

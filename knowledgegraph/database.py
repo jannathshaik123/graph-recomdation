@@ -4,12 +4,12 @@ from neo4j import GraphDatabase
 from datetime import datetime
 import time
 
-# Neo4j connection configuration
-NEO4J_URI = "bolt://localhost:7687"  # Update if your Neo4j instance is hosted elsewhere
-NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "password"  # Change this to your actual password
 
-# Paths to Yelp dataset files
+NEO4J_URI = "bolt://localhost:7687"  
+NEO4J_USER = "neo4j"
+NEO4J_PASSWORD = "password"  
+
+
 base_path = os.path.join(os.path.dirname(os.path.dirname(os.getcwd())), "data/yelp_training_set")
 BUSINESS_FILE = os.path.join(base_path,"yelp_training_set_business.json")
 REVIEW_FILE = os.path.join(base_path,"yelp_training_set_review.json")
@@ -25,14 +25,14 @@ class YelpKnowledgeGraph:
     def create_constraints(self):
         """Create uniqueness constraints and indexes for better performance"""
         with self.driver.session() as session:
-            # Create constraints
+            
             session.run("CREATE CONSTRAINT business_id IF NOT EXISTS FOR (b:Business) REQUIRE b.business_id IS UNIQUE")
             session.run("CREATE CONSTRAINT user_id IF NOT EXISTS FOR (u:User) REQUIRE u.user_id IS UNIQUE")
             session.run("CREATE CONSTRAINT category_name IF NOT EXISTS FOR (c:Category) REQUIRE c.name IS UNIQUE")
             session.run("CREATE CONSTRAINT neighborhood_name IF NOT EXISTS FOR (n:Neighborhood) REQUIRE n.name IS UNIQUE")
             session.run("CREATE CONSTRAINT city_name IF NOT EXISTS FOR (c:City) REQUIRE c.name IS UNIQUE")
             
-            # Create indexes for better performance
+            
             session.run("CREATE INDEX business_name IF NOT EXISTS FOR (b:Business) ON (b.name)")
             session.run("CREATE INDEX review_date IF NOT EXISTS FOR (r:Review) ON (r.date)")
             
@@ -62,7 +62,7 @@ class YelpKnowledgeGraph:
                     batch = []
                     print(f"Processed {count} businesses")
                     
-            # Process any remaining businesses
+            
             if batch:
                 self._process_business_batch(batch)
                 
@@ -71,9 +71,9 @@ class YelpKnowledgeGraph:
     def _process_business_batch(self, batch):
         """Process a batch of business records"""
         with self.driver.session() as session:
-            # For each business in the batch
+            
             for business in batch:
-                # Create the business node
+                
                 business_query = """
                 MERGE (b:Business {business_id: $business_id})
                 SET b.name = $name,
@@ -101,7 +101,7 @@ class YelpKnowledgeGraph:
                     is_open=business['open']
                 )
                 
-                # Create city node and relationship
+                
                 session.run("""
                 MERGE (c:City {name: $city})
                 WITH c
@@ -109,7 +109,7 @@ class YelpKnowledgeGraph:
                 MERGE (b)-[:LOCATED_IN]->(c)
                 """, city=business['city'], business_id=business['business_id'])
                 
-                # Create categories and relationships
+                
                 for category in business['categories']:
                     session.run("""
                     MERGE (c:Category {name: $category})
@@ -118,9 +118,9 @@ class YelpKnowledgeGraph:
                     MERGE (b)-[:IN_CATEGORY]->(c)
                     """, category=category, business_id=business['business_id'])
                 
-                # Create neighborhoods and relationships
+                
                 for neighborhood in business.get('neighborhoods', []):
-                    if neighborhood:  # Skip empty neighborhood names
+                    if neighborhood:  
                         session.run("""
                         MERGE (n:Neighborhood {name: $neighborhood})
                         WITH n
@@ -146,7 +146,7 @@ class YelpKnowledgeGraph:
                     batch = []
                     print(f"Processed {count} users")
                     
-            # Process any remaining users
+            
             if batch:
                 self._process_user_batch(batch)
                 
@@ -156,7 +156,7 @@ class YelpKnowledgeGraph:
         """Process a batch of user records"""
         with self.driver.session() as session:
             for user in batch:
-                # Create user node
+                
                 session.run("""
                 MERGE (u:User {user_id: $user_id})
                 SET u.name = $name,
@@ -193,7 +193,7 @@ class YelpKnowledgeGraph:
                     batch = []
                     print(f"Processed {count} reviews")
                     
-            # Process any remaining reviews
+            
             if batch:
                 self._process_review_batch(batch)
                 
@@ -203,14 +203,14 @@ class YelpKnowledgeGraph:
         """Process a batch of review records"""
         with self.driver.session() as session:
             for review in batch:
-                # Parse date
+                
                 date_obj = datetime.strptime(review['date'], '%Y-%m-%d')
                 
-                # Generate a simple unique ID (combination of user_id and business_id with timestamp)
-                # This avoids the need for APOC
+                
+                
                 review_id = f"{review['user_id']}_{review['business_id']}_{date_obj.strftime('%Y%m%d')}"
                 
-                # Create review and relationships
+                
                 session.run("""
                 MATCH (u:User {user_id: $user_id})
                 MATCH (b:Business {business_id: $business_id})
@@ -257,7 +257,7 @@ class YelpKnowledgeGraph:
     def _process_checkin(self, checkin):
         """Process a check-in record"""
         with self.driver.session() as session:
-            # Create a checkin summary node
+            
             total_checkins = sum(checkin['checkin_info'].values())
             
             session.run("""
@@ -270,13 +270,13 @@ class YelpKnowledgeGraph:
             total_checkins=total_checkins
             )
             
-            # Create individual checkin time nodes (sample approach - can be optimized)
+            
             for time_slot, count in checkin['checkin_info'].items():
                 day_hour = time_slot.split('-')
                 hour = int(day_hour[0])
                 day = int(day_hour[1])
                 
-                # Map day number to day name
+                
                 day_names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
                 day_name = day_names[day]
                 
@@ -292,40 +292,40 @@ class YelpKnowledgeGraph:
                 count=count
                 )
 
-# Main function to run the data loading
+
 def main():
-    # Create the Neo4j connection
+    
     kg = YelpKnowledgeGraph(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
     
     try:
-        # Clear the database if needed (uncomment with caution!)
-        # kg.clear_database()
         
-        # Create constraints and indexes
+        
+        
+        
         kg.create_constraints()
         
-        # Load data
+        
         start_time = time.time()
         
-        # Load businesses
+        
         if os.path.exists(BUSINESS_FILE):
             kg.load_businesses(BUSINESS_FILE)
         else:
             print(f"File not found: {BUSINESS_FILE}")
         
-        # Load users
+        
         if os.path.exists(USER_FILE):
             kg.load_users(USER_FILE)
         else:
             print(f"File not found: {USER_FILE}")
         
-        # Load reviews (creates relationships between users and businesses)
+        
         if os.path.exists(REVIEW_FILE):
             kg.load_reviews(REVIEW_FILE)
         else:
             print(f"File not found: {REVIEW_FILE}")
         
-        # Load check-ins
+        
         if os.path.exists(CHECKIN_FILE):
             kg.load_checkins(CHECKIN_FILE)
         else:

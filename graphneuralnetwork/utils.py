@@ -53,25 +53,25 @@ class YelpTrainer:
         Returns:
             Dict of training history
         """
-        # Create checkpoint directory
+        
         os.makedirs(checkpoint_dir, exist_ok=True)
         
-        # Prepare graph data
+        
         graph_data = graph_data.to(self.device)
         x, edge_index, edge_attr = graph_data.x, graph_data.edge_index, graph_data.edge_attr
         
-        # Ensure train and val data are on the correct device
+        
         train_data = train_data.to(self.device)
         val_data = val_data.to(self.device)
         
-        # Create sampler for neighbor sampling
+        
         self._setup_neighbor_sampler(graph_data, train_data, val_data, batch_size, num_neighbors)
         
-        # Configure optimizer and loss function
+        
         optimizer = optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         criterion = nn.MSELoss()
         
-        # Training history
+        
         history = {
             'train_loss': [],
             'val_loss': [],
@@ -79,32 +79,32 @@ class YelpTrainer:
             'val_mae': []
         }
         
-        # Early stopping variables
+        
         best_val_loss = float('inf')
         best_epoch = 0
         no_improve_epochs = 0
         
-        # Training loop
+        
         for epoch in range(epochs):
             start_time = time.time()
             
-            # Training
+            
             self.model.train()
             train_loss = self._train_epoch(
                 optimizer, criterion, gradient_accumulation_steps
             )
             
-            # Validation
+            
             self.model.eval()
             val_metrics = self._validate(criterion)
             
-            # Update history
+            
             history['train_loss'].append(train_loss)
             history['val_loss'].append(val_metrics['loss'])
             history['val_rmse'].append(val_metrics['rmse'])
             history['val_mae'].append(val_metrics['mae'])
             
-            # Print epoch summary
+            
             epoch_time = time.time() - start_time
             print(f"Epoch {epoch+1}/{epochs} - {epoch_time:.2f}s - "
                   f"Train Loss: {train_loss:.4f} - "
@@ -112,13 +112,13 @@ class YelpTrainer:
                   f"Val RMSE: {val_metrics['rmse']:.4f} - "
                   f"Val MAE: {val_metrics['mae']:.4f}")
             
-            # Check for improvement
+            
             if val_metrics['loss'] < best_val_loss:
                 best_val_loss = val_metrics['loss']
                 best_epoch = epoch
                 no_improve_epochs = 0
                 
-                # Save best model
+                
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
@@ -130,12 +130,12 @@ class YelpTrainer:
             else:
                 no_improve_epochs += 1
                 
-            # Early stopping
+            
             if no_improve_epochs >= patience:
                 print(f"Early stopping at epoch {epoch+1}. Best epoch: {best_epoch+1}")
                 break
             
-            # Save checkpoint every 5 epochs
+            
             if (epoch + 1) % 5 == 0:
                 torch.save({
                     'epoch': epoch,
@@ -157,17 +157,17 @@ class YelpTrainer:
             batch_size: Batch size
             num_neighbors: Number of neighbors to sample at each layer
         """
-        # Extract user and business indices from the data
+        
         train_users = train_data[:, 0].unique()
         train_businesses = train_data[:, 1].unique()
         val_users = val_data[:, 0].unique()
         val_businesses = val_data[:, 1].unique()
         
-        # Combine user and business nodes for sampling
+        
         train_nodes = torch.cat([train_users, train_businesses]).unique()
         val_nodes = torch.cat([val_users, val_businesses]).unique()
         
-        # Create neighbor loaders
+        
         self.train_loader = NeighborLoader(
             graph_data,
             num_neighbors=num_neighbors,
@@ -184,7 +184,7 @@ class YelpTrainer:
             shuffle=False
         )
         
-        # Store mapping for recommendation pairs
+        
         self.train_pairs = train_data
         self.val_pairs = val_data
     
@@ -204,27 +204,27 @@ class YelpTrainer:
         num_batches = 0
         optimizer.zero_grad()
         
-        # Iterate over mini-batches with neighbor sampling
+        
         for i, batch in enumerate(tqdm(self.train_loader, desc="Training")):
-            # Move batch to device
+            
             batch = batch.to(self.device)
             
-            # Get relevant tensors and ensure they're on the right device
+            
             batch_users = self.train_pairs[:, 0].to(self.device)
             batch_businesses = self.train_pairs[:, 1].to(self.device)
             batch_n_id = batch.n_id.to(self.device)
             
-            # Find pairs where both user and business are in the current batch
+            
             user_mask = torch.isin(batch_users, batch_n_id)
             business_mask = torch.isin(batch_businesses, batch_n_id)
             pair_mask = user_mask & business_mask
             
             if not pair_mask.any():
-                continue  # Skip if no valid pairs in this batch
+                continue  
             
             batch_pairs = self.train_pairs[pair_mask]
             
-            # Map global indices to batch indices - use lists to avoid tensor construction issues
+            
             batch_user_indices = []
             batch_business_indices = []
             
@@ -238,12 +238,12 @@ class YelpTrainer:
                 if len(match_indices) > 0:
                     batch_business_indices.append(match_indices[0].item())
             
-            # Convert to tensors and move to device
+            
             batch_user_indices = torch.tensor(batch_user_indices, device=self.device)
             batch_business_indices = torch.tensor(batch_business_indices, device=self.device)
             batch_stars = batch_pairs[:, 2].float().to(self.device)
             
-            # Make sure the number of users and businesses match
+            
             min_len = min(len(batch_user_indices), len(batch_business_indices), len(batch_stars))
             if min_len == 0:
                 continue
@@ -252,26 +252,26 @@ class YelpTrainer:
             batch_business_indices = batch_business_indices[:min_len]
             batch_stars = batch_stars[:min_len]
             
-            # Forward pass
+            
             scores = self.model(batch.x, batch.edge_index, 
                               user_indices=batch_user_indices, 
                               business_indices=batch_business_indices)
             
-            # Calculate loss
+            
             loss = criterion(scores, batch_stars)
             
-            # Scale loss for gradient accumulation
+            
             loss = loss / gradient_accumulation_steps
             
-            # Backward pass
+            
             loss.backward()
             
-            # Update weights every gradient_accumulation_steps or at the end
+            
             if (i + 1) % gradient_accumulation_steps == 0 or (i + 1) == len(self.train_loader):
                 optimizer.step()
                 optimizer.zero_grad()
             
-            # Track metrics
+            
             total_loss += loss.item() * gradient_accumulation_steps
             num_batches += 1
         
@@ -293,27 +293,27 @@ class YelpTrainer:
         num_batches = 0
         
         with torch.no_grad():
-            # Iterate over mini-batches with neighbor sampling
+            
             for batch in tqdm(self.val_loader, desc="Validating"):
-                # Move batch to device
+                
                 batch = batch.to(self.device)
                 
-                # Get relevant tensors and ensure they're on the right device
+                
                 batch_users = self.val_pairs[:, 0].to(self.device)
                 batch_businesses = self.val_pairs[:, 1].to(self.device)
                 batch_n_id = batch.n_id.to(self.device)
                 
-                # Find pairs where both user and business are in the current batch
+                
                 user_mask = torch.isin(batch_users, batch_n_id)
                 business_mask = torch.isin(batch_businesses, batch_n_id)
                 pair_mask = user_mask & business_mask
                 
                 if not pair_mask.any():
-                    continue  # Skip if no valid pairs in this batch
+                    continue  
                 
                 batch_pairs = self.val_pairs[pair_mask]
                 
-                # Map global indices to batch indices - use lists to avoid tensor construction issues
+                
                 batch_user_indices = []
                 batch_business_indices = []
                 
@@ -327,12 +327,12 @@ class YelpTrainer:
                     if len(match_indices) > 0:
                         batch_business_indices.append(match_indices[0].item())
                 
-                # Convert to tensors and move to device
+                
                 batch_user_indices = torch.tensor(batch_user_indices, device=self.device)
                 batch_business_indices = torch.tensor(batch_business_indices, device=self.device)
                 batch_stars = batch_pairs[:, 2].float().to(self.device)
                 
-                # Make sure the number of users and businesses match
+                
                 min_len = min(len(batch_user_indices), len(batch_business_indices), len(batch_stars))
                 if min_len == 0:
                     continue
@@ -341,21 +341,21 @@ class YelpTrainer:
                 batch_business_indices = batch_business_indices[:min_len]
                 batch_stars = batch_stars[:min_len]
                 
-                # Forward pass
+                
                 scores = self.model(batch.x, batch.edge_index, 
                                   user_indices=batch_user_indices, 
                                   business_indices=batch_business_indices)
                 
-                # Calculate loss
+                
                 loss = criterion(scores, batch_stars)
                 
-                # Track metrics
+                
                 total_loss += loss.item()
                 all_preds.extend(scores.cpu().numpy())
                 all_targets.extend(batch_stars.cpu().numpy())
                 num_batches += 1
         
-        # Calculate metrics
+        
         all_preds = np.array(all_preds)
         all_targets = np.array(all_targets)
         
@@ -385,7 +385,7 @@ class YelpTrainer:
         graph_data = graph_data.to(self.device)
         test_data = test_data.to(self.device)
         
-        # Create test loader
+        
         test_users = test_data[:, 0].unique()
         test_businesses = test_data[:, 1].unique()
         test_nodes = torch.cat([test_users, test_businesses]).unique()
@@ -402,27 +402,27 @@ class YelpTrainer:
         all_targets = []
         
         with torch.no_grad():
-            # Iterate over mini-batches
+            
             for batch in tqdm(test_loader, desc="Testing"):
-                # Move batch to device
+                
                 batch = batch.to(self.device)
                 
-                # Get relevant tensors and ensure they're on the right device
+                
                 batch_users = test_data[:, 0].to(self.device)
                 batch_businesses = test_data[:, 1].to(self.device)
                 batch_n_id = batch.n_id.to(self.device)
                 
-                # Find pairs where both user and business are in the current batch
+                
                 user_mask = torch.isin(batch_users, batch_n_id)
                 business_mask = torch.isin(batch_businesses, batch_n_id)
                 pair_mask = user_mask & business_mask
                 
                 if not pair_mask.any():
-                    continue  # Skip if no valid pairs in this batch
+                    continue  
                 
                 batch_pairs = test_data[pair_mask]
                 
-                # Map global indices to batch indices - use lists to avoid tensor construction issues
+                
                 batch_user_indices = []
                 batch_business_indices = []
                 
@@ -436,12 +436,12 @@ class YelpTrainer:
                     if len(match_indices) > 0:
                         batch_business_indices.append(match_indices[0].item())
                 
-                # Convert to tensors and move to device
+                
                 batch_user_indices = torch.tensor(batch_user_indices, device=self.device)
                 batch_business_indices = torch.tensor(batch_business_indices, device=self.device)
                 batch_stars = batch_pairs[:, 2].float().to(self.device)
                 
-                # Make sure the number of users and businesses match
+                
                 min_len = min(len(batch_user_indices), len(batch_business_indices), len(batch_stars))
                 if min_len == 0:
                     continue
@@ -450,16 +450,16 @@ class YelpTrainer:
                 batch_business_indices = batch_business_indices[:min_len]
                 batch_stars = batch_stars[:min_len]
                 
-                # Forward pass
+                
                 scores = self.model(batch.x, batch.edge_index, 
                                   user_indices=batch_user_indices, 
                                   business_indices=batch_business_indices)
                 
-                # Store predictions
+                
                 all_preds.extend(scores.cpu().numpy())
                 all_targets.extend(batch_stars.cpu().numpy())
         
-        # Calculate metrics
+        
         all_preds = np.array(all_preds)
         all_targets = np.array(all_targets)
         

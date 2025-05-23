@@ -1,0 +1,22 @@
+Yelp Recommendation System Evaluation Report
+=========================================
+
+Model: SAGE GNN with 2 layers
+Checkpoint: best_model.pt
+
+Regression Metrics:
+- RMSE: 1.8979
+- MAE: 1.5920
+- R²: -0.0078
+
+Classification Metrics (threshold = {args.threshold}):
+- Precision: 0.6740
+- Recall: 0.8740
+- F1 Score: 0.7611
+
+Rating Distribution:
+- Rating 1: 30305 actual, 1456 predicted
+- Rating 2: 48754 actual, 111098 predicted
+- Rating 3: 97375 actual, 617440 predicted
+- Rating 4: 212923 actual, 122 predicted
+- Rating 5: 165951 actual, 0 predicted

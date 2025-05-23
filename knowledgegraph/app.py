@@ -10,11 +10,11 @@ import pickle
 import json
 from datetime import datetime
 
-# Add this line to the initialization section at the beginning of the file
+
 if 'current_model_timestamp' not in st.session_state:
     st.session_state.current_model_timestamp = None
     
-# Initialize session state variables if they don't exist
+
 if 'recommender' not in st.session_state:
     st.session_state.recommender = YelpRecommendationSystem(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
 
@@ -59,7 +59,7 @@ def load_model(timestamp=None):
 def train_new_model():
     """Train a new recommendation model"""
     with st.spinner("Training new model..."):
-        # Split data into training and test sets
+        
         train_set, test_set = st.session_state.recommender.split_train_test(
             test_size=0.2, 
             min_reviews=3, 
@@ -72,7 +72,7 @@ def train_new_model():
         
         st.session_state.test_set = test_set
         
-        # Train matrix factorization model
+        
         user_factors, business_factors, global_avg = st.session_state.recommender.train_matrix_factorization(
             num_factors=st.session_state.num_factors,
             learning_rate=st.session_state.learning_rate,
@@ -81,15 +81,15 @@ def train_new_model():
             sample_size=len(train_set)
         )
         
-        # Save the trained model
+        
         model_info = st.session_state.recommender.save_matrix_factorization_model(user_factors, business_factors, global_avg)
         
-        # Update session state
+        
         st.session_state.user_factors = user_factors
         st.session_state.business_factors = business_factors
         st.session_state.global_avg = global_avg
         
-        # Evaluate model
+        
         metrics = st.session_state.recommender.evaluate_recommendations(
             test_set, user_factors, business_factors, global_avg
         )
@@ -102,7 +102,7 @@ def train_new_model():
 def load_available_users(limit=100):
     """Load available users for recommendations"""
     with st.spinner("Loading users..."):
-        # Execute a Cypher query to get users with reviews
+        
         with st.session_state.recommender.driver.session() as session:
             query = """
             MATCH (u:User)-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
@@ -124,7 +124,7 @@ def load_available_users(limit=100):
 def load_available_businesses(limit=100):
     """Load available businesses for evaluation"""
     with st.spinner("Loading businesses..."):
-        # Execute a Cypher query to get businesses with reviews
+        
         with st.session_state.recommender.driver.session() as session:
             query = """
             MATCH (b:Business)<-[:ABOUT]-(r:Review)
@@ -146,7 +146,7 @@ def load_available_businesses(limit=100):
 
 def display_user_profile(user_id):
     """Display user profile information"""
-    # Get user details
+    
     with st.session_state.recommender.driver.session() as session:
         query = """
         MATCH (u:User {user_id: $user_id})
@@ -168,7 +168,7 @@ def display_user_profile(user_id):
             with col3:
                 st.metric("Fans", user_details['fans'])
             
-            # Get recent reviews
+            
             query = """
             MATCH (u:User {user_id: $user_id})-[:WROTE]->(r:Review)-[:ABOUT]->(b:Business)
             RETURN b.name as business_name, r.stars as rating, r.date as date
@@ -201,7 +201,7 @@ def display_business_profile(business_id):
         with col3:
             st.metric("City", business_details['city'])
         
-        # Display categories
+        
         if business_details['categories']:
             st.write("**Categories:** " + ", ".join(business_details['categories']))
     else:
@@ -226,47 +226,47 @@ def model_evaluation_page():
     """Page for evaluating recommendation models"""
     st.title("Model Evaluation")
     
-    # Load available models
+    
     available_models = st.session_state.recommender.get_available_models()
     
     if not available_models:
         st.warning("No trained models available. Please train a model first.")
         return
     
-    # Create tabs for different evaluation views
+    
     tabs = st.tabs(["Model Performance", "User-Item Predictions", "Train New Model"])
     
-    with tabs[0]:  # Model Performance tab
+    with tabs[0]:  
         st.subheader("Model Performance Metrics")
         
-        # Model selection dropdown
+        
         model_options = [f"Model from {model['timestamp']} - {model['num_users']} users" for model in available_models]
         selected_model_idx = st.selectbox("Select Model", range(len(model_options)), format_func=lambda x: model_options[x])
         
         selected_model = available_models[selected_model_idx]
         
-        # Load selected model if not already loaded
+        
         if st.session_state.user_factors is None or selected_model['timestamp'] != st.session_state.current_model_timestamp:
             if load_model(selected_model['timestamp']):
                 st.session_state.current_model_timestamp = selected_model['timestamp']
                 
-                # Get test set for evaluation if not available
+                
                 if not st.session_state.test_set:
                     _, test_set = st.session_state.recommender.split_train_test(test_size=0.2, min_reviews=3, sample_size=10000)
                     st.session_state.test_set = test_set
                 
-                # Evaluate model
+                
                 metrics = st.session_state.recommender.evaluate_recommendations(
                     st.session_state.test_set, st.session_state.user_factors, 
                     st.session_state.business_factors, st.session_state.global_avg
                 )
                 st.session_state.metrics = metrics
         
-        # Display metrics if available
+        
         if st.session_state.metrics:
             metrics = st.session_state.metrics
             
-            # Create a comparison table
+            
             df_metrics = pd.DataFrame({
                 'Model': ['Baseline', 'Matrix Factorization'],
                 'MAE': [metrics['baseline']['mae'], metrics['matrix_factorization']['mae']],
@@ -275,7 +275,7 @@ def model_evaluation_page():
             
             st.dataframe(df_metrics)
             
-            # Create visualization
+            
             fig, ax = plt.subplots(figsize=(10, 6))
             x = np.arange(len(df_metrics))
             width = 0.35
@@ -292,7 +292,7 @@ def model_evaluation_page():
             
             st.pyplot(fig)
             
-            # Model details
+            
             st.subheader("Model Details")
             st.write(f"**Global Average Rating:** {st.session_state.global_avg:.2f}")
             st.write(f"**Number of Users:** {len(st.session_state.user_factors)}")
@@ -301,24 +301,24 @@ def model_evaluation_page():
         else:
             st.info("No evaluation metrics available. Please train or load a model.")
     
-    with tabs[1]:  # User-Item Predictions tab
+    with tabs[1]:  
         st.subheader("User-Item Rating Predictions")
         
-        # Load users and businesses if not already loaded
+        
         if not st.session_state.available_users:
             st.session_state.available_users = load_available_users()
         
         if not st.session_state.available_businesses:
             st.session_state.available_businesses = load_available_businesses()
         
-        # Create selection boxes with combined name and ID
+        
         user_options = [f"{user['name']} (ID: {user['user_id']}) - {user['num_reviews']} reviews" 
                       for user in st.session_state.available_users]
         
         business_options = [f"{business['name']} (ID: {business['business_id']}) - {business['avg_stars']}⭐" 
                           for business in st.session_state.available_businesses]
         
-        # User and business selection
+        
         col1, col2 = st.columns(2)
         
         with col1:
@@ -331,20 +331,20 @@ def model_evaluation_page():
             selected_business = st.session_state.available_businesses[selected_business_idx]
             business_id = selected_business['business_id']
         
-        # Display user and business profiles
+        
         display_user_profile(user_id)
         st.markdown("---")
         display_business_profile(business_id)
         
-        # Make predictions
+        
         if st.session_state.user_factors is not None and st.session_state.business_factors is not None:
             st.markdown("---")
             st.subheader("Rating Predictions")
             
-            # Get actual rating if available
+            
             actual_rating = st.session_state.recommender.get_rating(user_id, business_id)
             
-            # Calculate predictions
+            
             baseline_pred = st.session_state.recommender.baseline_predict(user_id, business_id)
             
             mf_pred = None
@@ -353,18 +353,18 @@ def model_evaluation_page():
                 user_vector = st.session_state.user_factors[user_id]
                 business_vector = st.session_state.business_factors[business_id]
                 
-                # Extract bias terms
+                
                 user_bias = user_vector[-1]
                 business_bias = business_vector[-1]
                 
-                # Dot product of feature vectors
+                
                 dot_product = np.dot(user_vector[:-1], business_vector[:-1])
                 
-                # Final prediction
+                
                 mf_pred = st.session_state.global_avg + user_bias + business_bias + dot_product
-                mf_pred = max(1.0, min(5.0, mf_pred))  # Clip to valid range
+                mf_pred = max(1.0, min(5.0, mf_pred))  
             
-            # Display predictions
+            
             col1, col2, col3 = st.columns(3)
             
             with col1:
@@ -379,7 +379,7 @@ def model_evaluation_page():
                 else:
                     st.info("No MF prediction available")
             
-            # Explanation
+            
             st.markdown("---")
             st.subheader("Prediction Explanation")
             
@@ -401,17 +401,17 @@ def model_evaluation_page():
                 st.write(f"- User-Business Interaction: {dot_product:.2f}")
                 st.write(f"- Final MF Prediction: {mf_pred:.2f}")
     
-    with tabs[2]:  # Train New Model tab
+    with tabs[2]:  
         st.subheader("Train New Model")
         
-        # Model parameters
+        
         st.session_state.num_factors = st.slider("Number of Factors", 5, 50, 15)
         st.session_state.learning_rate = st.number_input("Learning Rate", 0.001, 0.1, 0.005, format="%.3f")
         st.session_state.reg_factor = st.number_input("Regularization Factor", 0.001, 0.1, 0.02, format="%.3f")
         st.session_state.num_iterations = st.slider("Number of Iterations", 5, 100, 20)
         st.session_state.sample_size = st.slider("Sample Size", 5000, 100000, 50000, step=5000)
         
-        # Train button
+        
         if st.button("Train New Model"):
             if train_new_model():
                 st.success("Model trained successfully! You can evaluate it in the Model Performance tab.")
@@ -421,9 +421,9 @@ def recommendation_page():
     """Page for generating recommendations for users"""
     st.title("Yelp Recommendation System")
     
-    # Check if model is loaded
+    
     if st.session_state.user_factors is None:
-        # Load latest model if available
+        
         available_models = st.session_state.recommender.get_available_models()
         if available_models:
             st.info("Loading the latest model...")
@@ -432,11 +432,11 @@ def recommendation_page():
             st.warning("No trained models available. Please go to Model Evaluation and train a model first.")
             return
     
-    # Load users if not already loaded
+    
     if not st.session_state.available_users:
         st.session_state.available_users = load_available_users()
     
-    # User selection with combined name and ID
+    
     user_options = [f"{user['name']} (ID: {user['user_id']}) - {user['num_reviews']} reviews" 
                   for user in st.session_state.available_users]
     
@@ -444,23 +444,23 @@ def recommendation_page():
     selected_user = st.session_state.available_users[selected_user_idx]
     user_id = selected_user['user_id']
     
-    # Display user profile
+    
     display_user_profile(user_id)
     
-    # Recommendation options
+    
     st.sidebar.header("Recommendation Options")
     rec_type = st.sidebar.radio("Recommendation Type", 
                                ["Collaborative Filtering", "Content-Based", "Hybrid"])
     top_n = st.sidebar.slider("Number of Recommendations", 5, 20, 10)
     
-    # Get recommendations button
+    
     if st.button("Get Recommendations"):
         recommendations = get_recommendations(user_id, rec_type, top_n)
         
         if recommendations:
             st.subheader(f"{rec_type} Recommendations for {selected_user['name']}")
             
-            # Display recommendations in cards
+            
             for i, rec in enumerate(recommendations):
                 with st.container():
                     col1, col2 = st.columns([3, 1])
@@ -471,11 +471,11 @@ def recommendation_page():
                         else:
                             st.subheader(f"{i+1}. {rec['name']} - {rec['score']:.2f} (score)")
                             
-                        # Show categories
+                        
                         if 'categories' in rec and rec['categories']:
                             st.write("**Categories:** " + ", ".join(rec['categories'][:5]))
                         
-                        # Show city if available
+                        
                         if 'city' in rec and rec['city']:
                             st.write(f"**Location:** {rec['city']}")
                     
@@ -483,7 +483,7 @@ def recommendation_page():
                         if 'avg_stars' in rec:
                             st.metric("Avg Rating", f"{rec['avg_stars']:.1f}⭐")
                         
-                        # Add a button to view more details
+                        
                         if st.button(f"Details #{i+1}", key=f"btn_{i}"):
                             display_business_profile(rec['business_id'])
                     
@@ -499,25 +499,25 @@ def main():
         layout="wide"
     )
     
-    # Add module reloading button to sidebar
+    
     with st.sidebar:
         if st.button("Reload Modules"):
             import importlib
-            import utils  # Assuming this is your module with YelpRecommendationSystem
+            import utils  
             importlib.reload(utils)
             st.success("Backend modules reloaded!")
     
-    # Sidebar navigation
+    
     st.sidebar.title("Navigation")
     page = st.sidebar.radio("Go to", ["Recommendations", "Model Evaluation"])
     
-    # Display selected page
+    
     if page == "Recommendations":
         recommendation_page()
     else:
         model_evaluation_page()
     
-    # Footer
+    
     st.sidebar.markdown("---")
     st.sidebar.info("Yelp Recommendation System powered by Neo4j")
 

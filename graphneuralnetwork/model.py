@@ -41,22 +41,15 @@ class YelpGNN(nn.Module):
         self.residual = residual
         self.batch_norm = batch_norm
         
-        # Layer lists for flexible architecture
         self.convs = nn.ModuleList()
         self.batch_norms = nn.ModuleList() if batch_norm else None
-        
-        # Input layer
         self.convs.append(self._create_conv_layer(input_dim, hidden_dim))
         if batch_norm:
             self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
-        
-        # Hidden layers
         for i in range(num_layers - 2):
             self.convs.append(self._create_conv_layer(hidden_dim, hidden_dim))
             if batch_norm:
                 self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
-        
-        # Output layer
         if num_layers > 1:
             self.convs.append(self._create_conv_layer(hidden_dim, output_dim))
             if batch_norm:
@@ -85,28 +78,22 @@ class YelpGNN(nn.Module):
         Returns:
             Node embeddings [num_nodes, output_dim]
         """
-        prev_x = None  # For residual connections
+        prev_x = None  
         
         for i, conv in enumerate(self.convs):
-            # Save previous layer output for residual connections
             if self.residual and i > 0:
                 prev_x = x
             
-            # GNN layer
             if edge_weight is not None:
                 x = conv(x, edge_index, edge_weight)
             else:
                 x = conv(x, edge_index)
             
-            # Apply batch norm if enabled
-            if self.batch_norm and i < len(self.convs) - 1:  # No batch norm on last layer
+            if self.batch_norm and i < len(self.convs) - 1:  
                 x = self.batch_norms[i](x)
             
-            # Add residual connection if enabled
             if self.residual and i > 0 and prev_x is not None and x.size(-1) == prev_x.size(-1):
                 x = x + prev_x
-            
-            # Apply activation and dropout (except last layer)
             if i < len(self.convs) - 1:
                 x = F.relu(x)
                 x = F.dropout(x, p=self.dropout, training=self.training)
@@ -122,8 +109,6 @@ class YelpRecommender(nn.Module):
         super(YelpRecommender, self).__init__()
         self.gnn = gnn_model
         self.embedding_dim = gnn_model.output_dim
-        
-        # Final prediction layers
         self.predictor = nn.Sequential(
             nn.Linear(self.embedding_dim * 2, prediction_dim),
             nn.ReLU(),
@@ -144,21 +129,13 @@ class YelpRecommender(nn.Module):
         Returns:
             Predicted scores for user-business pairs
         """
-        # Get node embeddings from GNN
         embeddings = self.gnn(x, edge_index, edge_weight)
-        
-        # If we're in inference mode without specific pairs
         if user_indices is None or business_indices is None:
             return embeddings
-        
-        # Get user and business embeddings
+
         user_embeds = embeddings[user_indices]
         business_embeds = embeddings[business_indices]
-        
-        # Concatenate user and business embeddings
         pair_embeds = torch.cat([user_embeds, business_embeds], dim=1)
-        
-        # Predict rating
         scores = self.predictor(pair_embeds).squeeze()
         
         return scores
